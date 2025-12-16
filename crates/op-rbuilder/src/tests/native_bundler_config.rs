@@ -12,7 +12,7 @@ mod tests {
 
         assert!(!config.enable_aa_bundler);
         assert_eq!(config.aa_gas_reserve_percentage, 20);
-        assert_eq!(config.aa_gas_threshold, 80);
+        assert_eq!(config.aa_gas_threshold, 50);
         assert!(config.aa_bundler_signer.is_none());
         assert!(config.aa_pool_url.is_none());
     }
@@ -81,7 +81,7 @@ mod tests {
 
         assert!(config.enable_aa_bundler);
         assert_eq!(config.aa_gas_reserve_percentage, 15);
-        assert_eq!(config.aa_gas_threshold, 80); // default
+        assert_eq!(config.aa_gas_threshold, 50); // default
         assert!(config.aa_bundler_signer.is_none());
         assert!(config.aa_pool_url.is_none());
     }

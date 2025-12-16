@@ -72,7 +72,7 @@ async fn native_bundler_with_mock_pool(rbuilder: LocalInstance) -> eyre::Result<
 #[rb_test(args = OpRbuilderArgs {
     enable_aa_bundler: true,
     aa_gas_reserve_percentage: 20,
-    aa_gas_threshold: 80,
+    aa_gas_threshold: 50,
     ..Default::default()
 })]
 async fn native_bundler_gas_reservation(_rbuilder: LocalInstance) -> eyre::Result<()> {
@@ -122,7 +122,7 @@ mod cli_tests {
             let args = node_command.ext;
             assert!(args.enable_aa_bundler);
             assert_eq!(args.aa_gas_reserve_percentage, 20); // default
-            assert_eq!(args.aa_gas_threshold, 80); // default
+            assert_eq!(args.aa_gas_threshold, 50); // default
             assert!(args.aa_pool_url.is_none());
         } else {
             panic!("Expected node command");

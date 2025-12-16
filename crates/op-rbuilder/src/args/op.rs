@@ -97,10 +97,10 @@ pub struct OpRbuilderArgs {
     )]
     pub aa_gas_reserve_percentage: u8,
 
-    /// Threshold percentage of block gas before starting AA bundle reservation
+    /// Threshold percentage of block gas before starting AA bundle creation (middle of block)
     #[arg(
         long = "aa.gas-threshold",
-        default_value = "80",
+        default_value = "50",
         env = "AA_GAS_THRESHOLD"
     )]
     pub aa_gas_threshold: u8,
