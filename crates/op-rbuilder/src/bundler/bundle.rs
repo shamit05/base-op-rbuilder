@@ -1,14 +1,21 @@
 //! Bundle transaction creation for ERC-4337 UserOperations
 //!
-//! ## V0 Bundle Building Strategy
+//! ## Gas Calculation (following Rundler)
 //!
-//! For v0, we optimistically build the biggest bundle where:
+//! Bundle gas limit is calculated as:
 //! ```text
-//! Sum(validationGasLimit) + Sum(executionGasLimit) + entrypointBuffer < MAX_BUNDLE_GAS
+//! bundle_gas = SHARED_GAS + sum(per_op_gas)
+//!
+//! where per_op_gas = total_verification_gas_limit
+//!                  + required_pre_execution_buffer
+//!                  + call_gas_limit
 //! ```
 //!
-//! The MAX_BUNDLE_GAS is typically 21M gas. If any ops fail during execution,
-//! we prune them out.
+//! The `required_pre_execution_buffer` captures EntryPoint overhead:
+//! - v0.6: verification_gas_limit + 5,000
+//! - v0.7: 10,000 + paymaster_post_op_gas + 1/63 of (call_gas + paymaster_post_op + 10,000)
+//!
+//! Finally, a 5% safety buffer is added to account for estimation variance.
 //!
 //! ## Mempool Interface
 //!
@@ -19,9 +26,6 @@
 //!     fn remove_operation(&mut self, hash: &UserOpHash) -> Result<Option<PoolOperation>>;
 //! }
 //! ```
-//!
-//! The `get_top_operations` already returns ops sorted by priority (highest gas price first),
-//! so bundling just needs to greedily consume from the iterator until gas limit is reached.
 
 use alloy_primitives::{Address, Bytes};
 #[cfg(test)]
@@ -33,8 +37,20 @@ use crate::tx_signer::Signer;
 /// Maximum gas for a single bundle transaction (21M gas)
 pub const MAX_BUNDLE_GAS: u64 = 21_000_000;
 
-/// Buffer gas for EntryPoint overhead per bundle
-pub const ENTRYPOINT_BUFFER_GAS: u64 = 100_000;
+/// Transaction intrinsic gas (shared across all ops in bundle)
+pub const BUNDLE_SHARED_GAS: u64 = 21_000;
+
+/// EntryPoint inner gas overhead for v0.6 (per op)
+/// See: rundler/crates/types/src/user_operation/v0_6.rs
+pub const ENTRY_POINT_INNER_GAS_OVERHEAD_V06: u64 = 5_000;
+
+/// EntryPoint inner gas overhead for v0.7 (per op)
+/// See: rundler/crates/types/src/user_operation/v0_7.rs
+pub const ENTRY_POINT_INNER_GAS_OVERHEAD_V07: u64 = 10_000;
+
+/// Extra buffer percent to add on the bundle transaction gas estimate (5%)
+/// See: rundler/crates/builder/src/bundle_proposer.rs
+pub const BUNDLE_TRANSACTION_GAS_OVERHEAD_PERCENT: u64 = 5;
 
 // EntryPoint handleOps function signature (v0.7 packed format)
 sol! {
@@ -113,22 +129,77 @@ pub struct BundleTransaction {
 }
 
 /// Gas information extracted from a UserOperation
+/// Follows Rundler's approach to gas calculation
 #[derive(Debug, Clone, Copy)]
 pub struct UserOpGasInfo {
     /// Verification gas limit
     pub verification_gas_limit: u64,
-    /// Call gas limit  
+    /// Call gas limit
     pub call_gas_limit: u64,
     /// Pre-verification gas
     pub pre_verification_gas: u64,
+    /// Paymaster verification gas limit (v0.7 only, 0 for v0.6)
+    pub paymaster_verification_gas_limit: u64,
+    /// Paymaster post-op gas limit (v0.7 only, 0 for v0.6)
+    pub paymaster_post_op_gas_limit: u64,
     /// Max fee per gas
     pub max_fee_per_gas: u128,
     /// Max priority fee per gas
     pub max_priority_fee_per_gas: u128,
+    /// Whether this is a v0.7 operation (affects gas calculation)
+    pub is_v07: bool,
+    /// Whether this operation has a paymaster (for v0.6 calculation)
+    pub has_paymaster: bool,
 }
 
 impl UserOpGasInfo {
-    /// Total gas required for this operation
+    /// Total verification gas limit
+    /// v0.6: verification_gas_limit * (2 if paymaster else 1)
+    /// v0.7: verification_gas_limit + paymaster_verification_gas_limit
+    pub fn total_verification_gas_limit(&self) -> u64 {
+        if self.is_v07 {
+            self.verification_gas_limit
+                .saturating_add(self.paymaster_verification_gas_limit)
+        } else {
+            // v0.6: if paymaster, double the verification gas
+            let mul = if self.has_paymaster { 2 } else { 1 };
+            self.verification_gas_limit.saturating_mul(mul)
+        }
+    }
+
+    /// Required pre-execution buffer (per Rundler)
+    ///
+    /// v0.6: verification_gas_limit + ENTRY_POINT_INNER_GAS_OVERHEAD_V06
+    /// v0.7: ENTRY_POINT_INNER_GAS_OVERHEAD_V07 + paymaster_post_op_gas_limit
+    ///       + 1/63 of (call_gas_limit + paymaster_post_op_gas_limit + overhead)
+    ///       (the 1/63 accounts for the 63/64ths rule in EVM call forwarding)
+    pub fn required_pre_execution_buffer(&self) -> u64 {
+        if self.is_v07 {
+            let base = ENTRY_POINT_INNER_GAS_OVERHEAD_V07
+                .saturating_add(self.paymaster_post_op_gas_limit);
+
+            // 63/64ths rule buffer
+            let inner_gas = self
+                .call_gas_limit
+                .saturating_add(self.paymaster_post_op_gas_limit)
+                .saturating_add(ENTRY_POINT_INNER_GAS_OVERHEAD_V07);
+
+            base.saturating_add(inner_gas / 63)
+        } else {
+            self.verification_gas_limit
+                .saturating_add(ENTRY_POINT_INNER_GAS_OVERHEAD_V06)
+        }
+    }
+
+    /// Gas limit contribution for this op in a bundle (excluding pre-verification gas)
+    /// Per Rundler: total_verification_gas_limit + required_pre_execution_buffer + call_gas_limit
+    pub fn bundle_gas_limit_without_pvg(&self) -> u64 {
+        self.total_verification_gas_limit()
+            .saturating_add(self.required_pre_execution_buffer())
+            .saturating_add(self.call_gas_limit)
+    }
+
+    /// Total gas required for this operation (simple sum, for backwards compat)
     pub fn total_gas(&self) -> u64 {
         self.verification_gas_limit
             .saturating_add(self.call_gas_limit)
@@ -145,23 +216,52 @@ impl UserOpGasInfo {
         let max_priority_fee = u128::from_be_bytes(fees[0..16].try_into().unwrap());
         let max_fee = u128::from_be_bytes(fees[16..32].try_into().unwrap());
 
+        // Parse paymaster data to extract gas limits (if present)
+        // paymasterAndData format: [paymaster (20)] [paymasterVerificationGasLimit (16)] [paymasterPostOpGasLimit (16)] [data...]
+        let (paymaster_verification_gas, paymaster_post_op_gas, has_paymaster) =
+            if op.paymasterAndData.len() >= 52 {
+                let pm_data = &op.paymasterAndData[..];
+                let pm_verification =
+                    u128::from_be_bytes(pm_data[20..36].try_into().unwrap_or([0u8; 16])) as u64;
+                let pm_post_op =
+                    u128::from_be_bytes(pm_data[36..52].try_into().unwrap_or([0u8; 16])) as u64;
+                (pm_verification, pm_post_op, true)
+            } else {
+                (0, 0, false)
+            };
+
         Self {
             verification_gas_limit: verification_gas,
             call_gas_limit: call_gas,
             pre_verification_gas: op.preVerificationGas.try_into().unwrap_or(u64::MAX),
+            paymaster_verification_gas_limit: paymaster_verification_gas,
+            paymaster_post_op_gas_limit: paymaster_post_op_gas,
             max_fee_per_gas: max_fee,
             max_priority_fee_per_gas: max_priority_fee,
+            is_v07: true,
+            has_paymaster,
         }
     }
 
     /// Extract gas info from unpacked v0.6 format
     pub fn from_unpacked(op: &UserOperation) -> Self {
+        let has_paymaster = op.paymasterAndData.len() >= 20;
+
         Self {
             verification_gas_limit: op.verificationGasLimit.try_into().unwrap_or(u64::MAX),
             call_gas_limit: op.callGasLimit.try_into().unwrap_or(u64::MAX),
             pre_verification_gas: op.preVerificationGas.try_into().unwrap_or(u64::MAX),
+            paymaster_verification_gas_limit: 0, // v0.6 doesn't have separate paymaster verification
+            paymaster_post_op_gas_limit: if has_paymaster {
+                // In v0.6, paymaster post-op uses verification_gas_limit * 2
+                op.verificationGasLimit.try_into().unwrap_or(0) * 2
+            } else {
+                0
+            },
             max_fee_per_gas: op.maxFeePerGas.try_into().unwrap_or(u128::MAX),
             max_priority_fee_per_gas: op.maxPriorityFeePerGas.try_into().unwrap_or(u128::MAX),
+            is_v07: false,
+            has_paymaster,
         }
     }
 }
@@ -179,11 +279,6 @@ pub struct BundleBuilder {
 
 impl BundleBuilder {
     /// Create a new bundle builder
-    ///
-    /// # Arguments
-    /// * `signer` - The signer for bundle transactions
-    /// * `beneficiary` - Address to receive bundle execution fees
-    /// * `entry_points` - List of supported EntryPoint addresses
     pub fn new(signer: Signer, beneficiary: Address, entry_points: Vec<Address>) -> Self {
         Self {
             signer,
@@ -208,17 +303,6 @@ impl BundleBuilder {
     }
 
     /// Create a bundle transaction from v0.7 packed UserOperations
-    ///
-    /// # Arguments
-    /// * `entry_point` - The EntryPoint address for this bundle
-    /// * `ops` - The packed UserOperations to bundle
-    /// * `op_hashes` - Hashes of the operations (for tracking/removal)
-    /// * `gas_limit` - Gas limit for the bundle transaction
-    /// * `max_fee_per_gas` - Max fee per gas
-    /// * `max_priority_fee_per_gas` - Max priority fee per gas
-    ///
-    /// # Returns
-    /// A `BundleTransaction` ready for inclusion in a block
     pub fn create_bundle_v07(
         &self,
         entry_point: Address,
@@ -230,7 +314,6 @@ impl BundleBuilder {
     ) -> BundleTransaction {
         let num_ops = ops.len();
 
-        // Encode the handleOps call for v0.7
         let call = IEntryPointV07::handleOpsCall {
             ops,
             beneficiary: self.beneficiary,
@@ -249,17 +332,6 @@ impl BundleBuilder {
     }
 
     /// Create a bundle transaction from v0.6 unpacked UserOperations
-    ///
-    /// # Arguments
-    /// * `entry_point` - The EntryPoint address for this bundle
-    /// * `ops` - The unpacked UserOperations to bundle
-    /// * `op_hashes` - Hashes of the operations (for tracking/removal)
-    /// * `gas_limit` - Gas limit for the bundle transaction
-    /// * `max_fee_per_gas` - Max fee per gas
-    /// * `max_priority_fee_per_gas` - Max priority fee per gas
-    ///
-    /// # Returns
-    /// A `BundleTransaction` ready for inclusion in a block
     pub fn create_bundle_v06(
         &self,
         entry_point: Address,
@@ -271,7 +343,6 @@ impl BundleBuilder {
     ) -> BundleTransaction {
         let num_ops = ops.len();
 
-        // Encode the handleOps call for v0.6
         let call = IEntryPointV06::handleOpsCall {
             ops,
             beneficiary: self.beneficiary,
@@ -289,64 +360,78 @@ impl BundleBuilder {
         }
     }
 
-    /// Calculate total gas for a set of operations from their gas info
+    /// Calculate total gas for a bundle (following Rundler's approach)
     ///
-    /// V0 Strategy: Sum(validationGasLimit) + Sum(callGasLimit) + Sum(preVerificationGas) + buffer
+    /// Formula: SHARED_GAS + sum(op.bundle_gas_limit_without_pvg())
+    /// Then apply 5% overhead buffer.
     ///
     /// # Arguments
     /// * `gas_infos` - Gas info for each operation
     ///
     /// # Returns
-    /// Total gas limit, capped at MAX_BUNDLE_GAS
-    pub fn calculate_total_gas(gas_infos: &[UserOpGasInfo]) -> u64 {
-        let base_gas = 21_000_u64;
+    /// Total gas limit with safety buffer, capped at MAX_BUNDLE_GAS
+    pub fn calculate_bundle_gas_limit(gas_infos: &[UserOpGasInfo]) -> u64 {
+        // Start with shared gas (transaction intrinsic)
+        let mut gas_limit = BUNDLE_SHARED_GAS as u128;
 
-        let total_op_gas: u64 = gas_infos
-            .iter()
-            .map(|info| info.total_gas())
-            .fold(0u64, |acc, gas| acc.saturating_add(gas));
+        // Add per-op gas contribution
+        for info in gas_infos {
+            gas_limit = gas_limit.saturating_add(info.bundle_gas_limit_without_pvg() as u128);
+        }
 
-        let total = base_gas
-            .saturating_add(ENTRYPOINT_BUFFER_GAS)
-            .saturating_add(total_op_gas);
+        // Apply 5% safety buffer (per Rundler)
+        gas_limit = increase_by_percent(gas_limit, BUNDLE_TRANSACTION_GAS_OVERHEAD_PERCENT as u128);
 
-        total.min(MAX_BUNDLE_GAS)
+        // Cap at MAX_BUNDLE_GAS
+        gas_limit.min(MAX_BUNDLE_GAS as u128) as u64
+    }
+
+    /// Calculate gas limit for adding a single operation to a bundle
+    ///
+    /// Returns the additional gas needed if this op is added.
+    pub fn gas_for_op(gas_info: &UserOpGasInfo) -> u64 {
+        gas_info.bundle_gas_limit_without_pvg()
     }
 
     /// Check if adding an operation would exceed the gas limit
-    ///
-    /// # Arguments
-    /// * `current_gas` - Current cumulative gas of operations in bundle
-    /// * `op_gas` - Gas info for the operation to add
-    /// * `max_bundle_gas` - Maximum gas allowed for the bundle
-    ///
-    /// # Returns
-    /// `true` if the operation can fit, `false` if it would exceed the limit
-    pub fn can_add_operation(current_gas: u64, op_gas: &UserOpGasInfo, max_bundle_gas: u64) -> bool {
-        let op_total = op_gas.total_gas();
-        current_gas.saturating_add(op_total) <= max_bundle_gas
+    pub fn can_add_operation(
+        current_gas: u64,
+        op_gas: &UserOpGasInfo,
+        max_bundle_gas: u64,
+    ) -> bool {
+        let op_contribution = Self::gas_for_op(op_gas);
+        let new_total = current_gas.saturating_add(op_contribution);
+        // Account for the overhead buffer when checking
+        let buffered = increase_by_percent(new_total as u128, BUNDLE_TRANSACTION_GAS_OVERHEAD_PERCENT as u128);
+        buffered <= max_bundle_gas as u128
     }
 
     /// Estimate gas for a bundle (simple estimation)
     ///
-    /// This provides a rough estimate based on the number of operations.
-    /// Actual gas usage depends on the specific UserOperations.
-    ///
     /// # Arguments
     /// * `num_ops` - Number of UserOperations in the bundle
-    /// * `avg_gas_per_op` - Average gas per operation (default: 100,000)
+    /// * `avg_gas_per_op` - Average gas per operation (default: 150,000)
     ///
     /// # Returns
     /// Estimated gas limit for the bundle
     pub fn estimate_bundle_gas(num_ops: usize, avg_gas_per_op: Option<u64>) -> u64 {
-        let avg = avg_gas_per_op.unwrap_or(100_000);
-        let base_gas = 21_000_u64;
-
-        base_gas
-            .saturating_add(ENTRYPOINT_BUFFER_GAS)
-            .saturating_add(num_ops as u64 * avg)
-            .min(MAX_BUNDLE_GAS)
+        let avg = avg_gas_per_op.unwrap_or(150_000);
+        let gas = BUNDLE_SHARED_GAS.saturating_add(num_ops as u64 * avg);
+        let buffered = increase_by_percent(gas as u128, BUNDLE_TRANSACTION_GAS_OVERHEAD_PERCENT as u128);
+        buffered.min(MAX_BUNDLE_GAS as u128) as u64
     }
+
+    // Keep old method for backwards compatibility
+    #[deprecated(note = "Use calculate_bundle_gas_limit instead")]
+    pub fn calculate_total_gas(gas_infos: &[UserOpGasInfo]) -> u64 {
+        Self::calculate_bundle_gas_limit(gas_infos)
+    }
+}
+
+/// Increase a value by a percentage
+/// (val * (100 + percent)) / 100
+pub fn increase_by_percent(val: u128, percent: u128) -> u128 {
+    val.saturating_mul(100 + percent) / 100
 }
 
 /// Configuration for the bundle builder
@@ -369,7 +454,7 @@ impl Default for BundleConfig {
         Self {
             enabled: false,
             signer: None,
-            gas_threshold: 80,
+            gas_threshold: 50, // Updated to 50% for middle-of-block
             gas_reserve: 20,
             pool_url: None,
         }
@@ -442,40 +527,137 @@ mod tests {
     }
 
     #[test]
-    fn test_user_op_gas_info() {
+    fn test_user_op_gas_info_v06() {
         let gas_info = UserOpGasInfo {
             verification_gas_limit: 100_000,
             call_gas_limit: 50_000,
             pre_verification_gas: 21_000,
+            paymaster_verification_gas_limit: 0,
+            paymaster_post_op_gas_limit: 0,
             max_fee_per_gas: 1_000_000_000,
             max_priority_fee_per_gas: 100_000_000,
+            is_v07: false,
+            has_paymaster: false,
         };
 
-        assert_eq!(gas_info.total_gas(), 171_000);
+        // total_verification = 100k (no paymaster)
+        assert_eq!(gas_info.total_verification_gas_limit(), 100_000);
+
+        // required_pre_execution_buffer = verification (100k) + overhead (5k)
+        assert_eq!(gas_info.required_pre_execution_buffer(), 105_000);
+
+        // bundle_gas_limit_without_pvg = total_verification (100k) + buffer (105k) + call (50k)
+        assert_eq!(gas_info.bundle_gas_limit_without_pvg(), 255_000);
     }
 
     #[test]
-    fn test_calculate_total_gas() {
+    fn test_user_op_gas_info_v06_with_paymaster() {
+        let gas_info = UserOpGasInfo {
+            verification_gas_limit: 100_000,
+            call_gas_limit: 50_000,
+            pre_verification_gas: 21_000,
+            paymaster_verification_gas_limit: 0,
+            paymaster_post_op_gas_limit: 200_000, // verification * 2
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 100_000_000,
+            is_v07: false,
+            has_paymaster: true,
+        };
+
+        // total_verification = 100k * 2 = 200k (with paymaster)
+        assert_eq!(gas_info.total_verification_gas_limit(), 200_000);
+
+        // required_pre_execution_buffer = verification (100k) + overhead (5k)
+        assert_eq!(gas_info.required_pre_execution_buffer(), 105_000);
+
+        // bundle_gas_limit_without_pvg = total_verification (200k) + buffer (105k) + call (50k)
+        assert_eq!(gas_info.bundle_gas_limit_without_pvg(), 355_000);
+    }
+
+    #[test]
+    fn test_user_op_gas_info_v07() {
+        let gas_info = UserOpGasInfo {
+            verification_gas_limit: 100_000,
+            call_gas_limit: 50_000,
+            pre_verification_gas: 21_000,
+            paymaster_verification_gas_limit: 0,
+            paymaster_post_op_gas_limit: 0,
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 100_000_000,
+            is_v07: true,
+            has_paymaster: false,
+        };
+
+        // total_verification = 100k + 0 = 100k
+        assert_eq!(gas_info.total_verification_gas_limit(), 100_000);
+
+        // required_pre_execution_buffer = 10k + 0 + (50k + 0 + 10k) / 63
+        // = 10,000 + 952 = 10,952
+        assert_eq!(gas_info.required_pre_execution_buffer(), 10_952);
+
+        // bundle_gas_limit_without_pvg = 100k + 10,952 + 50k = 160,952
+        assert_eq!(gas_info.bundle_gas_limit_without_pvg(), 160_952);
+    }
+
+    #[test]
+    fn test_user_op_gas_info_v07_with_paymaster() {
+        let gas_info = UserOpGasInfo {
+            verification_gas_limit: 100_000,
+            call_gas_limit: 50_000,
+            pre_verification_gas: 21_000,
+            paymaster_verification_gas_limit: 50_000,
+            paymaster_post_op_gas_limit: 30_000,
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 100_000_000,
+            is_v07: true,
+            has_paymaster: true,
+        };
+
+        // total_verification = 100k + 50k = 150k
+        assert_eq!(gas_info.total_verification_gas_limit(), 150_000);
+
+        // required_pre_execution_buffer = 10k + 30k + (50k + 30k + 10k) / 63
+        // = 40,000 + 1,428 = 41,428
+        assert_eq!(gas_info.required_pre_execution_buffer(), 41_428);
+
+        // bundle_gas_limit_without_pvg = 150k + 41,428 + 50k = 241,428
+        assert_eq!(gas_info.bundle_gas_limit_without_pvg(), 241_428);
+    }
+
+    #[test]
+    fn test_calculate_bundle_gas_limit() {
+        // Two v0.6 ops without paymaster
         let gas_infos = vec![
             UserOpGasInfo {
                 verification_gas_limit: 100_000,
                 call_gas_limit: 50_000,
                 pre_verification_gas: 21_000,
+                paymaster_verification_gas_limit: 0,
+                paymaster_post_op_gas_limit: 0,
                 max_fee_per_gas: 1_000_000_000,
                 max_priority_fee_per_gas: 100_000_000,
+                is_v07: false,
+                has_paymaster: false,
             },
             UserOpGasInfo {
                 verification_gas_limit: 80_000,
                 call_gas_limit: 40_000,
                 pre_verification_gas: 21_000,
+                paymaster_verification_gas_limit: 0,
+                paymaster_post_op_gas_limit: 0,
                 max_fee_per_gas: 1_000_000_000,
                 max_priority_fee_per_gas: 100_000_000,
+                is_v07: false,
+                has_paymaster: false,
             },
         ];
 
-        // base (21k) + buffer (100k) + op1 (171k) + op2 (141k) = 433k
-        let total = BundleBuilder::calculate_total_gas(&gas_infos);
-        assert_eq!(total, 21_000 + ENTRYPOINT_BUFFER_GAS + 171_000 + 141_000);
+        // Op1: bundle_gas = 100k + 105k + 50k = 255k
+        // Op2: bundle_gas = 80k + 85k + 40k = 205k
+        // Total = 21k (shared) + 255k + 205k = 481k
+        // With 5% buffer = 481k * 1.05 = 505,050
+        let total = BundleBuilder::calculate_bundle_gas_limit(&gas_infos);
+        assert_eq!(total, 505_050);
     }
 
     #[test]
@@ -484,32 +666,35 @@ mod tests {
             verification_gas_limit: 100_000,
             call_gas_limit: 50_000,
             pre_verification_gas: 21_000,
+            paymaster_verification_gas_limit: 0,
+            paymaster_post_op_gas_limit: 0,
             max_fee_per_gas: 1_000_000_000,
             max_priority_fee_per_gas: 100_000_000,
+            is_v07: false,
+            has_paymaster: false,
         };
 
-        // Can fit when there's room
-        assert!(BundleBuilder::can_add_operation(0, &op_gas, 200_000));
-        assert!(BundleBuilder::can_add_operation(29_000, &op_gas, 200_000));
+        // op contributes 255k gas
+        // Can fit in 300k (255k * 1.05 = 267,750)
+        assert!(BundleBuilder::can_add_operation(0, &op_gas, 300_000));
 
-        // Cannot fit when at limit
-        assert!(!BundleBuilder::can_add_operation(30_000, &op_gas, 200_000));
-        assert!(!BundleBuilder::can_add_operation(200_000, &op_gas, 200_000));
+        // Cannot fit if we already have 100k used (355k * 1.05 = 372,750 > 300k)
+        assert!(!BundleBuilder::can_add_operation(100_000, &op_gas, 300_000));
     }
 
     #[test]
     fn test_estimate_bundle_gas() {
-        // Single op with defaults: base + buffer + 1 * 100k
+        // Single op: 21k + 150k = 171k, with 5% = 179,550
         let gas = BundleBuilder::estimate_bundle_gas(1, None);
-        assert_eq!(gas, 21_000 + ENTRYPOINT_BUFFER_GAS + 100_000); // 221,000
+        assert_eq!(gas, 179_550);
 
-        // Multiple ops: base + buffer + 5 * 100k
+        // Multiple ops: 21k + 5 * 150k = 771k, with 5% = 809,550
         let gas = BundleBuilder::estimate_bundle_gas(5, None);
-        assert_eq!(gas, 21_000 + ENTRYPOINT_BUFFER_GAS + 500_000); // 621,000
+        assert_eq!(gas, 809_550);
 
-        // Custom gas per op: base + buffer + 3 * 150k
-        let gas = BundleBuilder::estimate_bundle_gas(3, Some(150_000));
-        assert_eq!(gas, 21_000 + ENTRYPOINT_BUFFER_GAS + 450_000); // 571,000
+        // Custom gas per op: 21k + 3 * 200k = 621k, with 5% = 652,050
+        let gas = BundleBuilder::estimate_bundle_gas(3, Some(200_000));
+        assert_eq!(gas, 652_050);
     }
 
     #[test]
@@ -518,7 +703,7 @@ mod tests {
 
         assert!(!config.enabled);
         assert!(config.signer.is_none());
-        assert_eq!(config.gas_threshold, 80);
+        assert_eq!(config.gas_threshold, 50); // Updated default
         assert_eq!(config.gas_reserve, 20);
         assert!(config.pool_url.is_none());
     }
@@ -534,5 +719,11 @@ mod tests {
         config.signer = Some(test_signer());
         assert!(config.is_ready());
     }
-}
 
+    #[test]
+    fn test_increase_by_percent() {
+        assert_eq!(increase_by_percent(100, 5), 105);
+        assert_eq!(increase_by_percent(1000, 10), 1100);
+        assert_eq!(increase_by_percent(100, 0), 100);
+    }
+}

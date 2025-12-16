@@ -40,8 +40,9 @@ mod gas_tracker;
 mod pool_client;
 
 pub use bundle::{
-    BundleBuilder, BundleConfig, BundleTransaction, PackedUserOperation, UserOpGasInfo,
-    UserOperation, ENTRYPOINT_BUFFER_GAS, MAX_BUNDLE_GAS,
+    increase_by_percent, BundleBuilder, BundleConfig, BundleTransaction, PackedUserOperation,
+    UserOpGasInfo, UserOperation, BUNDLE_SHARED_GAS, BUNDLE_TRANSACTION_GAS_OVERHEAD_PERCENT,
+    ENTRY_POINT_INNER_GAS_OVERHEAD_V06, ENTRY_POINT_INNER_GAS_OVERHEAD_V07, MAX_BUNDLE_GAS,
 };
 pub use bundler::{entry_points, BundleResult, Bundler};
 pub use gas_tracker::{GasReservation, GasTracker};

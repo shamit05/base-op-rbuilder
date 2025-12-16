@@ -100,7 +100,7 @@ pub struct OpRbuilderArgs {
     /// Threshold percentage of block gas before starting AA bundle creation (middle of block)
     #[arg(
         long = "aa.gas-threshold",
-        default_value = "30",
+        default_value = "50",
         env = "AA_GAS_THRESHOLD"
     )]
     pub aa_gas_threshold: u8,
