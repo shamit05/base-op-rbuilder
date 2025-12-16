@@ -202,7 +202,7 @@ impl<S: Default + Clone> Default for BuilderConfig<S> {
             enable_aa_bundler: false,
             aa_bundler_signer: None,
             aa_gas_reserve_percentage: 20,
-            aa_gas_threshold: 80,
+            aa_gas_threshold: 30,
             aa_pool_url: None,
         }
     }

@@ -14,7 +14,7 @@
 //!
 //! Bundles are placed in the **middle** of the block, not at the top or end:
 //! - **Top**: Reserved for EOA bidders (until we get tx independence in AA)
-//! - **Middle**: AA bundles are inserted here (configurable gas threshold)
+//! - **Middle**: AA bundles are inserted here (configurable gas threshold ~50%)
 //! - **End**: Avoided because large bundles might not fit
 //!
 //! ## V0 Bundle Building Strategy
@@ -26,16 +26,27 @@
 //!
 //! ## Gas Allocation
 //!
-//! - `aa_gas_threshold`: Percentage of block gas at which to start considering bundles (e.g., 50%)
-//! - `aa_gas_reserve_percentage`: Percentage of block gas allocated for bundles (e.g., 20%)
+//! - `aa_gas_threshold`: Percentage of block gas at which to start considering bundles (default: 50%)
+//! - `aa_gas_reserve_percentage`: Percentage of block gas allocated for bundles (default: 20%)
+//!
+//! ## Pool Client
+//!
+//! The `PoolClient` trait defines the interface for fetching UserOperations from the mempool.
+//! See `pool_client` module for details.
 
-mod gas_tracker;
 mod bundle;
+mod bundler;
+mod gas_tracker;
+mod pool_client;
 
-pub use gas_tracker::{GasReservation, GasTracker};
 pub use bundle::{
-    BundleBuilder, BundleConfig, BundleTransaction, 
-    PackedUserOperation, UserOperation, UserOpGasInfo,
-    MAX_BUNDLE_GAS, ENTRYPOINT_BUFFER_GAS,
+    BundleBuilder, BundleConfig, BundleTransaction, PackedUserOperation, UserOpGasInfo,
+    UserOperation, ENTRYPOINT_BUFFER_GAS, MAX_BUNDLE_GAS,
+};
+pub use bundler::{entry_points, BundleResult, Bundler};
+pub use gas_tracker::{GasReservation, GasTracker};
+pub use pool_client::{
+    NoOpPoolClient, OperationGasInfo, PoolClient, PoolClientError, PoolOperation, UserOpHash,
+    UserOperationV06, UserOperationV07, UserOperationVariant,
 };
 
