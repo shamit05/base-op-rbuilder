@@ -38,6 +38,15 @@ pub struct Bundler<P: PoolClient> {
     enabled: bool,
 }
 
+impl<P: PoolClient> std::fmt::Debug for Bundler<P> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Bundler")
+            .field("enabled", &self.enabled)
+            .field("gas_tracker", &self.gas_tracker)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Result of bundle building
 #[derive(Debug)]
 pub struct BundleResult {

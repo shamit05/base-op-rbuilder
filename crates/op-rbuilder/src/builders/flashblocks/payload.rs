@@ -7,10 +7,12 @@ use crate::{
         flashblocks::{best_txs::BestFlashblocksTxs, config::FlashBlocksConfigExt},
         generator::{BlockCell, BuildArguments, PayloadBuilder},
     },
+    bundler::{Bundler, NoOpPoolClient},
     gas_limiter::AddressGasLimiter,
     metrics::OpRBuilderMetrics,
     primitives::reth::ExecutionInfo,
     traits::{ClientBounds, PoolBounds},
+    tx_signer::Signer,
 };
 use alloy_consensus::{
     BlockBody, EMPTY_OMMER_ROOT_HASH, Header, constants::EMPTY_WITHDRAWALS, proofs,
@@ -158,6 +160,9 @@ pub(super) struct OpPayloadBuilder<Pool, Client, BuilderTx> {
     pub builder_tx: BuilderTx,
     /// Rate limiting based on gas. This is an optional feature.
     pub address_gas_limiter: AddressGasLimiter,
+    /// Account Abstraction bundler for building UserOperation bundles
+    /// Currently uses NoOpPoolClient until BA-3414 connects to the actual mempool
+    pub aa_bundler: Option<Arc<Bundler<NoOpPoolClient>>>,
 }
 
 impl<Pool, Client, BuilderTx> OpPayloadBuilder<Pool, Client, BuilderTx> {
@@ -174,6 +179,35 @@ impl<Pool, Client, BuilderTx> OpPayloadBuilder<Pool, Client, BuilderTx> {
         metrics: Arc<OpRBuilderMetrics>,
     ) -> Self {
         let address_gas_limiter = AddressGasLimiter::new(config.gas_limiter_config.clone());
+
+        // Initialize AA bundler if enabled
+        let aa_bundler = if config.enable_aa_bundler {
+            let signer = config
+                .aa_bundler_signer
+                .clone()
+                .unwrap_or_else(Signer::random);
+            // Use a default block gas limit - will be updated per block
+            let block_gas_limit = 30_000_000;
+
+            info!(
+                target: "payload_builder",
+                bundler_address = %signer.address,
+                gas_threshold = config.aa_gas_threshold,
+                gas_reserve = config.aa_gas_reserve_percentage,
+                "AA bundler enabled for flashblocks"
+            );
+
+            Some(Arc::new(Bundler::new(
+                NoOpPoolClient,
+                signer,
+                block_gas_limit,
+                config.aa_gas_threshold,
+                config.aa_gas_reserve_percentage,
+            )))
+        } else {
+            None
+        };
+
         Self {
             evm_config,
             pool,
@@ -184,6 +218,7 @@ impl<Pool, Client, BuilderTx> OpPayloadBuilder<Pool, Client, BuilderTx> {
             metrics,
             builder_tx,
             address_gas_limiter,
+            aa_bundler,
         }
     }
 }
@@ -718,6 +753,55 @@ where
         ctx.metrics
             .payload_transaction_simulation_gauge
             .set(payload_transaction_simulation_time);
+
+        // === AA Bundle Building ===
+        // Check if we should build AA bundles based on gas threshold
+        if let Some(ref bundler) = self.aa_bundler {
+            if bundler.should_build_bundles(info.cumulative_gas_used) {
+                let bundle_start_time = Instant::now();
+
+                // Get base fee from context
+                let base_fee = ctx.base_fee() as u128;
+                // Use a reasonable priority fee (this would come from the pool in production)
+                let priority_fee = 1_000_000_000u128; // 1 gwei
+
+                let bundle_result = bundler.build_bundles(base_fee, priority_fee);
+
+                if !bundle_result.bundles.is_empty() {
+                    info!(
+                        target: "payload_builder",
+                        num_bundles = bundle_result.bundles.len(),
+                        total_ops = bundle_result.total_ops,
+                        total_gas = bundle_result.total_gas,
+                        "Built AA bundles for flashblock"
+                    );
+
+                    // TODO (BA-3414): Execute bundle transactions through EVM
+                    // For now, we just log that we would execute them
+                    // When pool client is connected, this will:
+                    // 1. Execute each bundle transaction through EVM
+                    // 2. Handle failures gracefully (prune failed ops)
+                    // 3. Update cumulative gas used
+                    // 4. Add bundle txs to executed_transactions
+
+                    for bundle in &bundle_result.bundles {
+                        debug!(
+                            target: "payload_builder",
+                            entry_point = %bundle.entry_point,
+                            num_ops = bundle.num_ops,
+                            gas_limit = bundle.gas_limit,
+                            "Would execute AA bundle (pool not connected)"
+                        );
+                    }
+
+                    ctx.metrics
+                        .aa_bundle_build_duration
+                        .record(bundle_start_time.elapsed());
+                    ctx.metrics.aa_bundles_built.increment(bundle_result.bundles.len() as u64);
+                    ctx.metrics.aa_ops_bundled.increment(bundle_result.total_ops as u64);
+                }
+            }
+        }
 
         if let Err(e) = self
             .builder_tx

@@ -167,6 +167,20 @@ pub struct OpRBuilderMetrics {
     pub metering_unknown_transaction: Counter,
     /// Count of the number of times we were unable to resolve metering information due to locking
     pub metering_locked_transaction: Counter,
+
+    // === Account Abstraction (AA) Bundler Metrics ===
+    /// Histogram of time taken to build AA bundles
+    pub aa_bundle_build_duration: Histogram,
+    /// Number of AA bundles built
+    pub aa_bundles_built: Counter,
+    /// Number of UserOperations bundled
+    pub aa_ops_bundled: Counter,
+    /// Number of AA bundles that failed simulation
+    pub aa_bundles_failed: Counter,
+    /// Number of UserOperations that failed and were pruned
+    pub aa_ops_failed: Counter,
+    /// Gas used by AA bundles
+    pub aa_bundle_gas_used: Histogram,
 }
 
 impl OpRBuilderMetrics {
