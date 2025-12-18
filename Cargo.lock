@@ -3,6 +3,29 @@
 version = 4
 
 [[package]]
+name = "account-abstraction-core"
+version = "0.1.0"
+source = "git+https://github.com/base/tips.git?rev=44d41b2f34b0d0607bfb5d65fb71eb462bd24d71#44d41b2f34b0d0607bfb5d65fb71eb462bd24d71"
+dependencies = [
+ "alloy-primitives 1.4.1",
+ "alloy-provider",
+ "alloy-rpc-types",
+ "alloy-serde",
+ "alloy-sol-types 1.4.1",
+ "anyhow",
+ "async-trait",
+ "jsonrpsee 0.26.0",
+ "op-alloy-network",
+ "rdkafka",
+ "reth-rpc-eth-types",
+ "serde",
+ "serde_json",
+ "tips-core 0.1.0 (git+https://github.com/base/tips.git?rev=44d41b2f34b0d0607bfb5d65fb71eb462bd24d71)",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7087,6 +7110,7 @@ dependencies = [
 name = "op-rbuilder"
 version = "0.2.13"
 dependencies = [
+ "account-abstraction-core",
  "alloy-consensus",
  "alloy-contract",
  "alloy-eips",
@@ -7097,6 +7121,7 @@ dependencies = [
  "alloy-primitives 1.4.1",
  "alloy-provider",
  "alloy-rpc-client",
+ "alloy-rpc-types",
  "alloy-rpc-types-beacon",
  "alloy-rpc-types-engine",
  "alloy-rpc-types-eth",
@@ -7205,7 +7230,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tikv-jemallocator",
  "time",
- "tips-core",
+ "tips-core 0.1.0 (git+https://github.com/base/tips?rev=c08eaa4fe10c26de8911609b41ddab4918698325)",
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
@@ -7268,6 +7293,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d05e27ee213611ffe7d6348b942e8f942b37114c00cc03cec254295a4a17852e"
 
 [[package]]
+name = "openssl-src"
+version = "300.5.4+3.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a507b3792995dae9b0df8a1c1e3771e8418b7c2d9f0baeba32e6fe8b06c7cb72"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "openssl-sys"
 version = "0.9.111"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7275,6 +7309,7 @@ checksum = "82cab2d520aa75e3c58898289429321eb788c3106963d0dc886ec7a5f4adc321"
 dependencies = [
  "cc",
  "libc",
+ "openssl-src",
  "pkg-config",
  "vcpkg",
 ]
@@ -8376,6 +8411,38 @@ dependencies = [
  "rustls-pki-types",
  "time",
  "yasna",
+]
+
+[[package]]
+name = "rdkafka"
+version = "0.37.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "14b52c81ac3cac39c9639b95c20452076e74b8d9a71bc6fc4d83407af2ea6fff"
+dependencies = [
+ "futures-channel",
+ "futures-util",
+ "libc",
+ "log",
+ "rdkafka-sys",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "slab",
+ "tokio",
+]
+
+[[package]]
+name = "rdkafka-sys"
+version = "4.9.0+2.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5230dca48bc354d718269f3e4353280e188b610f7af7e2fcf54b7a79d5802872"
+dependencies = [
+ "libc",
+ "libz-sys",
+ "num_enum",
+ "openssl-sys",
+ "pkg-config",
+ "zstd-sys",
 ]
 
 [[package]]
@@ -13357,6 +13424,24 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 [[package]]
 name = "tips-core"
 version = "0.1.0"
+source = "git+https://github.com/base/tips.git?rev=44d41b2f34b0d0607bfb5d65fb71eb462bd24d71#44d41b2f34b0d0607bfb5d65fb71eb462bd24d71"
+dependencies = [
+ "alloy-consensus",
+ "alloy-primitives 1.4.1",
+ "alloy-provider",
+ "alloy-rpc-types",
+ "alloy-serde",
+ "op-alloy-consensus",
+ "op-alloy-flz",
+ "serde",
+ "tracing",
+ "tracing-subscriber 0.3.20",
+ "uuid",
+]
+
+[[package]]
+name = "tips-core"
+version = "0.1.0"
 source = "git+https://github.com/base/tips?rev=c08eaa4fe10c26de8911609b41ddab4918698325#c08eaa4fe10c26de8911609b41ddab4918698325"
 dependencies = [
  "alloy-consensus",
@@ -15391,6 +15476,7 @@ version = "2.0.16+zstd.1.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "91e19ebc2adc8f83e43039e79776e3fda8ca919132d68a1fed6a5faca2683748"
 dependencies = [
+ "bindgen 0.72.1",
  "cc",
  "pkg-config",
 ]

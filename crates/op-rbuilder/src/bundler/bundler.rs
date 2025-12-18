@@ -5,16 +5,18 @@
 use std::sync::Arc;
 
 use alloy_primitives::{Address, FixedBytes};
-
+use account_abstraction_core::{mempool::{Mempool}, types::VersionedUserOperation};
+use tokio::sync::RwLock;
 use super::{
     bundle::{
         increase_by_percent, BundleBuilder, BundleTransaction, PackedUserOperation,
         UserOpGasInfo, UserOperation, BUNDLE_SHARED_GAS, BUNDLE_TRANSACTION_GAS_OVERHEAD_PERCENT,
     },
     gas_tracker::GasTracker,
-    pool_client::{PoolClient, PoolOperation, UserOperationVariant},
+    pool_client::{PoolOperation},
 };
 use crate::tx_signer::Signer;
+use alloy_rpc_types::erc4337;
 
 /// Known EntryPoint addresses
 pub mod entry_points {
@@ -27,9 +29,9 @@ pub mod entry_points {
 }
 
 /// The main bundler that orchestrates AA bundle creation
-pub struct Bundler<P: PoolClient> {
+pub struct Bundler<P: Mempool> {
     /// Pool client for fetching operations
-    pool_client: P,
+    pool_client: Arc<RwLock<P>>,
     /// Bundle builder for creating transactions
     bundle_builder: BundleBuilder,
     /// Gas tracker for reservation logic
@@ -49,7 +51,7 @@ pub struct BundleResult {
     pub total_ops: usize,
 }
 
-impl<P: PoolClient> Bundler<P> {
+impl<P: Mempool> Bundler<P> {
     /// Create a new bundler
     ///
     /// # Arguments
@@ -59,7 +61,7 @@ impl<P: PoolClient> Bundler<P> {
     /// * `threshold_percentage` - Gas percentage at which to build bundles (e.g., 50)
     /// * `reserve_percentage` - Gas percentage reserved for bundles (e.g., 20)
     pub fn new(
-        pool_client: P,
+        pool_client: Arc<RwLock<P>>,
         signer: Signer,
         block_gas_limit: u64,
         threshold_percentage: u8,
@@ -83,7 +85,7 @@ impl<P: PoolClient> Bundler<P> {
     }
 
     /// Create a disabled bundler (no-op)
-    pub fn disabled(pool_client: P) -> Self {
+    pub fn disabled(pool_client: Arc<RwLock<P>>) -> Self {
         Self {
             pool_client,
             bundle_builder: BundleBuilder::new(Signer::random(), Address::ZERO, vec![]),
@@ -109,8 +111,8 @@ impl<P: PoolClient> Bundler<P> {
     /// # Arguments
     /// * `base_fee` - Current block base fee
     /// * `priority_fee` - Priority fee to use for bundle transactions
-    pub fn build_bundles(&self, base_fee: u128, priority_fee: u128) -> BundleResult {
-        if !self.enabled || !self.pool_client.is_ready() {
+    pub async fn build_bundles(&self, base_fee: u128, priority_fee: u128) -> BundleResult {
+        if !self.enabled  {
             return BundleResult {
                 bundles: vec![],
                 total_gas: 0,
@@ -121,7 +123,7 @@ impl<P: PoolClient> Bundler<P> {
         // Fetch top operations from pool (already sorted by priority)
         let reserved_gas = self.gas_tracker.calculate_reserved_gas();
         let max_ops = self.estimate_max_ops(reserved_gas);
-        let operations = self.pool_client.get_top_operations(max_ops);
+        let operations = self.pool_client.read().await.get_top_operations(max_ops).collect::<Vec<_>>();
 
         if operations.is_empty() {
             return BundleResult {
@@ -132,36 +134,35 @@ impl<P: PoolClient> Bundler<P> {
         }
 
         // Group operations by entry point
-        let (v06_ops, v07_ops) = self.group_by_entry_point(&operations);
+        // TODO: Group by entry point
 
         let mut bundles = Vec::new();
         let mut total_gas = 0u64;
         let mut total_ops = 0usize;
-
+        let pool_operations = operations.into_iter().map(|op| PoolOperation::from_wrapped(&op)).collect::<Vec<_>>();
         // Build v0.6 bundle if there are operations
-        if !v06_ops.is_empty() {
-            if let Some(bundle) =
-                self.build_v06_bundle(&v06_ops, base_fee, priority_fee, reserved_gas)
-            {
-                total_gas = total_gas.saturating_add(bundle.gas_limit);
-                total_ops += bundle.num_ops;
-                bundles.push(bundle);
-            }
+        if let Some(bundle) =
+            self.build_v06_bundle(&pool_operations, base_fee, priority_fee, reserved_gas)
+        {
+            total_gas = total_gas.saturating_add(bundle.gas_limit);
+            total_ops += bundle.num_ops;
+            bundles.push(bundle);
         }
+        
 
         // Build v0.7 bundle if there are operations (with remaining gas)
         let remaining_gas = reserved_gas.saturating_sub(total_gas);
         // Need at least shared gas + some buffer for a bundle to be worthwhile
         let min_gas_for_bundle = BUNDLE_SHARED_GAS * 2;
-        if !v07_ops.is_empty() && remaining_gas > min_gas_for_bundle {
-            if let Some(bundle) =
-                self.build_v07_bundle(&v07_ops, base_fee, priority_fee, remaining_gas)
-            {
-                total_gas = total_gas.saturating_add(bundle.gas_limit);
-                total_ops += bundle.num_ops;
-                bundles.push(bundle);
-            }
-        }
+        // if !v07_ops.is_empty() && remaining_gas > min_gas_for_bundle {
+        //     if let Some(bundle) =
+        //         self.build_v07_bundle(&v07_ops, base_fee, priority_fee, remaining_gas)
+        //     {
+        //         total_gas = total_gas.saturating_add(bundle.gas_limit);
+        //         total_ops += bundle.num_ops;
+        //         bundles.push(bundle);
+        //     }
+        // }
 
         BundleResult {
             bundles,
@@ -171,10 +172,12 @@ impl<P: PoolClient> Bundler<P> {
     }
 
     /// Remove operations that were included in bundles
-    pub fn remove_included_operations(&self, bundles: &[BundleTransaction]) {
+    pub async fn remove_included_operations(&self, bundles: &[BundleTransaction]) {
         for bundle in bundles {
             for hash in &bundle.op_hashes {
-                let _ = self.pool_client.remove_operation(hash);
+                let mut mempool = self.pool_client.write().await;
+                let hash_fixed = FixedBytes::from(*hash);
+                let _ = mempool.remove_operation(&hash_fixed);
             }
         }
     }
@@ -211,7 +214,7 @@ impl<P: PoolClient> Bundler<P> {
     /// Build a v0.6 bundle from operations using per-op gas calculation
     fn build_v06_bundle(
         &self,
-        operations: &[Arc<PoolOperation>],
+        operations: &[PoolOperation],
         base_fee: u128,
         priority_fee: u128,
         max_gas: u64,
@@ -238,7 +241,7 @@ impl<P: PoolClient> Bundler<P> {
                 break;
             }
 
-            if let UserOperationVariant::V06(v06) = &pool_op.operation {
+            if let VersionedUserOperation::UserOperation(v06) = &pool_op.operation {
                 ops.push(convert_to_v06_sol(v06));
                 hashes.push(pool_op.hash);
                 gas_infos.push(gas_info);
@@ -293,7 +296,7 @@ impl<P: PoolClient> Bundler<P> {
                 break;
             }
 
-            if let UserOperationVariant::V07(v07) = &pool_op.operation {
+            if let VersionedUserOperation::PackedUserOperation(v07) = &pool_op.operation {
                 ops.push(convert_to_v07_sol(v07));
                 hashes.push(pool_op.hash);
                 gas_infos.push(gas_info);
@@ -332,7 +335,7 @@ impl<P: PoolClient> Bundler<P> {
 /// Convert pool operation gas info to UserOpGasInfo for v0.6
 fn pool_op_to_gas_info_v06(pool_op: &PoolOperation) -> UserOpGasInfo {
     let has_paymaster = match &pool_op.operation {
-        UserOperationVariant::V06(op) => op.paymaster_and_data.len() >= 20,
+        VersionedUserOperation::UserOperation(op) => op.paymaster_and_data.len() >= 20,
         _ => false,
     };
 
@@ -357,8 +360,8 @@ fn pool_op_to_gas_info_v06(pool_op: &PoolOperation) -> UserOpGasInfo {
 fn pool_op_to_gas_info_v07(pool_op: &PoolOperation) -> UserOpGasInfo {
     // For v0.7, we need to extract paymaster gas from paymasterAndData
     let (pm_verification, pm_post_op, has_paymaster) = match &pool_op.operation {
-        UserOperationVariant::V07(op) if op.paymaster_and_data.len() >= 52 => {
-            let pm_data = &op.paymaster_and_data[..];
+        VersionedUserOperation::PackedUserOperation(op) if op.paymaster_data.is_some() && op.paymaster_data.as_ref().unwrap().len() >= 52 => {
+            let pm_data = op.paymaster_data.as_ref().unwrap().clone();
             let pm_verification =
                 u128::from_be_bytes(pm_data[20..36].try_into().unwrap_or([0u8; 16])) as u64;
             let pm_post_op =
@@ -382,7 +385,7 @@ fn pool_op_to_gas_info_v07(pool_op: &PoolOperation) -> UserOpGasInfo {
 }
 
 /// Convert pool client V06 type to sol type for handleOps
-fn convert_to_v06_sol(op: &super::pool_client::UserOperationV06) -> UserOperation {
+fn convert_to_v06_sol(op: &erc4337::UserOperation) -> UserOperation {
     UserOperation {
         sender: op.sender,
         nonce: op.nonce,
@@ -399,15 +402,15 @@ fn convert_to_v06_sol(op: &super::pool_client::UserOperationV06) -> UserOperatio
 }
 
 /// Convert pool client V07 type to sol type for handleOps
-fn convert_to_v07_sol(op: &super::pool_client::UserOperationV07) -> PackedUserOperation {
+fn convert_to_v07_sol(op: &erc4337::PackedUserOperation) -> PackedUserOperation {
     PackedUserOperation {
         sender: op.sender,
         nonce: op.nonce,
         initCode: op.init_code.clone(),
         callData: op.call_data.clone(),
-        accountGasLimits: FixedBytes::from(op.account_gas_limits),
+        accountGasLimits: op.account_gas_limits,
         preVerificationGas: op.pre_verification_gas,
-        gasFees: FixedBytes::from(op.gas_fees),
+        gasFees: op.gas_fees,
         paymasterAndData: op.paymaster_and_data.clone(),
         signature: op.signature.clone(),
     }

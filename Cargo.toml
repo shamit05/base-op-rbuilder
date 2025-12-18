@@ -67,7 +67,7 @@ reth-primitives-traits = { git = "https://github.com/paradigmxyz/reth", tag = "v
 reth-provider = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3", features = [
     "test-utils",
 ] }
-
+account-abstraction-core = {git = "https://github.com/base/tips.git", rev="44d41b2f34b0d0607bfb5d65fb71eb462bd24d71"}
 reth-chainspec = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
 reth-storage-api = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
 reth-rpc-api = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }

@@ -25,7 +25,7 @@
 
 use alloy_primitives::{Address, Bytes, U256};
 use std::sync::Arc;
-
+use account_abstraction_core::types::{VersionedUserOperation, WrappedUserOperation};
 /// Hash of a UserOperation (32 bytes)
 pub type UserOpHash = [u8; 32];
 
@@ -43,7 +43,27 @@ pub struct PoolOperation {
     /// Gas limits and fees
     pub gas_info: OperationGasInfo,
     /// The raw operation data for building handleOps calldata
-    pub operation: UserOperationVariant,
+    pub operation: VersionedUserOperation,
+}
+
+impl PoolOperation {
+
+    pub fn from_wrapped(wrapped: &WrappedUserOperation) -> Self {
+        Self {
+            hash: [0u8; 32], // Some default value
+            entry_point: Address::ZERO,
+            sender: Address::ZERO,
+            nonce: U256::ZERO,
+            gas_info: OperationGasInfo {
+                verification_gas_limit: 0,
+                call_gas_limit: 0,
+                pre_verification_gas: 0,
+                max_fee_per_gas: 0,
+                max_priority_fee_per_gas: 0,
+            },
+            operation: wrapped.operation.clone(),
+        }
+    }
 }
 
 /// Gas information for a UserOperation
@@ -70,46 +90,6 @@ impl OperationGasInfo {
     }
 }
 
-/// UserOperation variant (v0.6 unpacked or v0.7 packed)
-#[derive(Debug, Clone)]
-pub enum UserOperationVariant {
-    /// EntryPoint v0.6 (unpacked format)
-    V06(UserOperationV06),
-    /// EntryPoint v0.7 (packed format)
-    V07(UserOperationV07),
-}
-
-/// UserOperation v0.6 (unpacked format)
-#[derive(Debug, Clone)]
-pub struct UserOperationV06 {
-    pub sender: Address,
-    pub nonce: U256,
-    pub init_code: Bytes,
-    pub call_data: Bytes,
-    pub call_gas_limit: U256,
-    pub verification_gas_limit: U256,
-    pub pre_verification_gas: U256,
-    pub max_fee_per_gas: U256,
-    pub max_priority_fee_per_gas: U256,
-    pub paymaster_and_data: Bytes,
-    pub signature: Bytes,
-}
-
-/// UserOperation v0.7 (packed format)
-#[derive(Debug, Clone)]
-pub struct UserOperationV07 {
-    pub sender: Address,
-    pub nonce: U256,
-    pub init_code: Bytes,
-    pub call_data: Bytes,
-    /// Packed: verificationGasLimit (16 bytes) | callGasLimit (16 bytes)
-    pub account_gas_limits: [u8; 32],
-    pub pre_verification_gas: U256,
-    /// Packed: maxPriorityFeePerGas (16 bytes) | maxFeePerGas (16 bytes)
-    pub gas_fees: [u8; 32],
-    pub paymaster_and_data: Bytes,
-    pub signature: Bytes,
-}
 
 /// Trait for the pool client that fetches UserOperations
 ///

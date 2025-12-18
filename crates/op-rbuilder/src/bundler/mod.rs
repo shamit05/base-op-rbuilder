@@ -48,6 +48,5 @@ pub use bundler::{entry_points, BundleResult, Bundler};
 pub use gas_tracker::{GasReservation, GasTracker};
 pub use pool_client::{
     NoOpPoolClient, OperationGasInfo, PoolClient, PoolClientError, PoolOperation, UserOpHash,
-    UserOperationV06, UserOperationV07, UserOperationVariant,
 };
 

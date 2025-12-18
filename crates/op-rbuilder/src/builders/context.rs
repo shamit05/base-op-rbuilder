@@ -1,3 +1,4 @@
+use account_abstraction_core::mempool::MempoolImpl;
 use alloy_consensus::{Eip658Value, Transaction, conditional::BlockConditionalAttributes};
 use alloy_eips::{Encodable2718, Typed2718};
 use alloy_evm::Database;
@@ -40,7 +41,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace};
 
 use crate::{
-    bundler::{Bundler, GasTracker, NoOpPoolClient},
+    bundler::{Bundler, GasTracker},
     gas_limiter::AddressGasLimiter,
     metrics::OpRBuilderMetrics,
     primitives::reth::{ExecutionInfo, TxnExecutionResult},
@@ -51,7 +52,6 @@ use crate::{
 };
 
 /// Container type that holds all necessities to build a new payload.
-#[derive(Debug)]
 pub struct OpPayloadBuilderCtx<ExtraCtx: Debug + Default = ()> {
     /// The type that knows how to perform system calls and configure the evm.
     pub evm_config: OpEvmConfig,
@@ -89,6 +89,8 @@ pub struct OpPayloadBuilderCtx<ExtraCtx: Debug + Default = ()> {
     pub aa_gas_threshold: u8,
     /// Gas reserve percentage (how much gas to reserve for bundles)
     pub aa_gas_reserve: u8,
+
+    pub aa_bundler: Bundler<MempoolImpl>,
 }
 
 impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
@@ -658,7 +660,7 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
     /// 5. Updates execution info with results
     ///
     /// Returns the number of AA bundle transactions executed
-    pub(super) fn execute_aa_bundles<E: Debug + Default>(
+    pub(super) async fn execute_aa_bundles<E: Debug + Default>(
         &self,
         info: &mut ExecutionInfo<E>,
         db: &mut State<impl Database>,
@@ -671,16 +673,10 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
             return Ok(0);
         }
 
-        let bundler = Bundler::new(
-            NoOpPoolClient,
-            signer.clone(),
-            self.block_gas_limit(),
-            self.aa_gas_threshold,
-            self.aa_gas_reserve,
-        );
+       
 
         // Check if we should build bundles at current gas usage
-        if !bundler.should_build_bundles(info.cumulative_gas_used) {
+        if !self.aa_bundler.should_build_bundles(info.cumulative_gas_used) {
             return Ok(0);
         }
 
@@ -689,7 +685,7 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
         let priority_fee = 1_000_000_000u128; // 1 gwei
 
         // Build bundles from the pool
-        let bundle_result = bundler.build_bundles(base_fee, priority_fee);
+        let bundle_result = self.aa_bundler.build_bundles(base_fee, priority_fee).await;
 
         if bundle_result.bundles.is_empty() {
             debug!(
