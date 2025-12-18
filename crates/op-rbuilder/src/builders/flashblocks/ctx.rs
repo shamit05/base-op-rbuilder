@@ -4,6 +4,7 @@ use crate::{
     metrics::OpRBuilderMetrics,
     resource_metering::ResourceMetering,
     traits::ClientBounds,
+    tx_signer::Signer,
 };
 use op_revm::OpSpecId;
 use reth_basic_payload_builder::PayloadConfig;
@@ -32,6 +33,14 @@ pub(super) struct OpPayloadSyncerCtx {
     metrics: Arc<OpRBuilderMetrics>,
     /// Resource metering tracking
     resource_metering: ResourceMetering,
+    /// Whether AA bundling is enabled
+    aa_bundler_enabled: bool,
+    /// AA bundler signer for bundle transactions
+    aa_bundler_signer: Option<Signer>,
+    /// Gas threshold percentage (when to start bundling)
+    aa_gas_threshold: u8,
+    /// Gas reserve percentage (how much gas to reserve for bundles)
+    aa_gas_reserve: u8,
 }
 
 impl OpPayloadSyncerCtx {
@@ -51,7 +60,11 @@ impl OpPayloadSyncerCtx {
             chain_spec,
             max_gas_per_txn: builder_config.max_gas_per_txn,
             metrics,
-            resource_metering: builder_config.resource_metering,
+            resource_metering: builder_config.resource_metering.clone(),
+            aa_bundler_enabled: builder_config.enable_aa_bundler,
+            aa_bundler_signer: builder_config.aa_bundler_signer,
+            aa_gas_threshold: builder_config.aa_gas_threshold,
+            aa_gas_reserve: builder_config.aa_gas_reserve_percentage,
         })
     }
 
@@ -85,6 +98,10 @@ impl OpPayloadSyncerCtx {
             max_gas_per_txn: self.max_gas_per_txn,
             address_gas_limiter: AddressGasLimiter::new(GasLimiterArgs::default()),
             resource_metering: self.resource_metering.clone(),
+            aa_bundler_enabled: self.aa_bundler_enabled,
+            aa_bundler_signer: self.aa_bundler_signer,
+            aa_gas_threshold: self.aa_gas_threshold,
+            aa_gas_reserve: self.aa_gas_reserve,
         }
     }
 }

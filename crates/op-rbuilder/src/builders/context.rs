@@ -40,6 +40,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace};
 
 use crate::{
+    bundler::{Bundler, GasTracker, NoOpPoolClient},
     gas_limiter::AddressGasLimiter,
     metrics::OpRBuilderMetrics,
     primitives::reth::{ExecutionInfo, TxnExecutionResult},
@@ -80,6 +81,14 @@ pub struct OpPayloadBuilderCtx<ExtraCtx: Debug + Default = ()> {
     pub address_gas_limiter: AddressGasLimiter,
     /// Per transaction resource metering information
     pub resource_metering: ResourceMetering,
+    /// Whether AA bundling is enabled
+    pub aa_bundler_enabled: bool,
+    /// AA bundler signer for bundle transactions
+    pub aa_bundler_signer: Option<Signer>,
+    /// Gas threshold percentage (when to start bundling)
+    pub aa_gas_threshold: u8,
+    /// Gas reserve percentage (how much gas to reserve for bundles)
+    pub aa_gas_reserve: u8,
 }
 
 impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
@@ -622,5 +631,237 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
             bundles_reverted = num_bundles_reverted,
         );
         Ok(None)
+    }
+
+    /// Check if AA bundler is ready (enabled with signer)
+    pub fn is_aa_bundler_ready(&self) -> bool {
+        self.aa_bundler_enabled && self.aa_bundler_signer.is_some()
+    }
+
+    /// Check if AA bundles should be built at current gas usage
+    pub fn should_build_aa_bundles(&self, cumulative_gas_used: u64) -> bool {
+        if !self.is_aa_bundler_ready() {
+            return false;
+        }
+        let gas_tracker =
+            GasTracker::new(self.block_gas_limit(), self.aa_gas_threshold, self.aa_gas_reserve);
+        gas_tracker.check_reservation(cumulative_gas_used).threshold_reached
+    }
+
+    /// Execute AA bundles if threshold is reached
+    ///
+    /// This method:
+    /// 1. Creates a bundler with the current pool client
+    /// 2. Fetches UserOperations from the pool
+    /// 3. Builds bundle transactions
+    /// 4. Executes them through the EVM
+    /// 5. Updates execution info with results
+    ///
+    /// Returns the number of AA bundle transactions executed
+    pub(super) fn execute_aa_bundles<E: Debug + Default>(
+        &self,
+        info: &mut ExecutionInfo<E>,
+        db: &mut State<impl Database>,
+    ) -> Result<usize, PayloadBuilderError> {
+        let Some(signer) = &self.aa_bundler_signer else {
+            return Ok(0);
+        };
+
+        if !self.aa_bundler_enabled {
+            return Ok(0);
+        }
+
+        let bundler = Bundler::new(
+            NoOpPoolClient,
+            signer.clone(),
+            self.block_gas_limit(),
+            self.aa_gas_threshold,
+            self.aa_gas_reserve,
+        );
+
+        // Check if we should build bundles at current gas usage
+        if !bundler.should_build_bundles(info.cumulative_gas_used) {
+            return Ok(0);
+        }
+
+        let base_fee = self.base_fee() as u128;
+        // Use a reasonable priority fee for bundle transactions
+        let priority_fee = 1_000_000_000u128; // 1 gwei
+
+        // Build bundles from the pool
+        let bundle_result = bundler.build_bundles(base_fee, priority_fee);
+
+        if bundle_result.bundles.is_empty() {
+            debug!(
+                target: "payload_builder",
+                message = "AA bundler: no bundles to execute (pool empty or not ready)",
+            );
+            return Ok(0);
+        }
+
+        info!(
+            target: "payload_builder",
+            message = "AA bundler: executing bundles",
+            num_bundles = bundle_result.bundles.len(),
+            total_ops = bundle_result.total_ops,
+            estimated_gas = bundle_result.total_gas,
+        );
+
+        let mut bundles_executed = 0;
+
+        // Execute each bundle transaction
+        for bundle in &bundle_result.bundles {
+            match self.execute_aa_bundle_tx(info, db, bundle) {
+                Ok(true) => {
+                    bundles_executed += 1;
+                    info!(
+                        target: "payload_builder",
+                        message = "AA bundle executed successfully",
+                        entry_point = ?bundle.entry_point,
+                        num_ops = bundle.num_ops,
+                        gas_limit = bundle.gas_limit,
+                    );
+                }
+                Ok(false) => {
+                    debug!(
+                        target: "payload_builder",
+                        message = "AA bundle skipped (would exceed limits)",
+                        entry_point = ?bundle.entry_point,
+                    );
+                }
+                Err(e) => {
+                    debug!(
+                        target: "payload_builder",
+                        message = "AA bundle execution failed",
+                        entry_point = ?bundle.entry_point,
+                        error = ?e,
+                    );
+                }
+            }
+        }
+
+        // Remove successfully included operations from the pool
+        // Note: In production, this would go through the pool client
+        // bundler.remove_included_operations(&bundle_result.bundles);
+
+        Ok(bundles_executed)
+    }
+
+    /// Execute a single AA bundle transaction
+    fn execute_aa_bundle_tx<E: Debug + Default>(
+        &self,
+        info: &mut ExecutionInfo<E>,
+        db: &mut State<impl Database>,
+        bundle: &crate::bundler::BundleTransaction,
+    ) -> Result<bool, PayloadBuilderError> {
+        use alloy_consensus::TxEip1559;
+        use alloy_primitives::TxKind;
+        use op_alloy_consensus::OpTypedTransaction;
+
+        // Check if we have room for this bundle
+        let block_gas_limit = self.block_gas_limit();
+        if info.cumulative_gas_used + bundle.gas_limit > block_gas_limit {
+            debug!(
+                target: "payload_builder",
+                message = "AA bundle would exceed block gas limit",
+                cumulative_gas = info.cumulative_gas_used,
+                bundle_gas = bundle.gas_limit,
+                block_limit = block_gas_limit,
+            );
+            return Ok(false);
+        }
+
+        let Some(signer) = &self.aa_bundler_signer else {
+            debug!(
+                target: "payload_builder",
+                message = "AA bundler signer not configured",
+            );
+            return Ok(false);
+        };
+
+        // Get nonce from state
+        let nonce = db
+            .database
+            .basic(signer.address)
+            .map_err(|_| {
+                PayloadBuilderError::other(OpPayloadBuilderError::AccountLoadFailed(signer.address))
+            })?
+            .map(|acc| acc.nonce)
+            .unwrap_or(0);
+
+        // Create the EIP-1559 transaction
+        let tx = OpTypedTransaction::Eip1559(TxEip1559 {
+            chain_id: self.chain_spec.chain().id(),
+            nonce,
+            gas_limit: bundle.gas_limit,
+            max_fee_per_gas: bundle.max_fee_per_gas,
+            max_priority_fee_per_gas: bundle.max_priority_fee_per_gas,
+            to: TxKind::Call(bundle.entry_point),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            input: bundle.calldata.clone(),
+        });
+
+        // Sign the transaction
+        let signed_tx = signer.sign_tx(tx).map_err(|_| {
+            PayloadBuilderError::other(OpPayloadBuilderError::TransactionEcRecoverFailed)
+        })?;
+
+        // Execute through EVM
+        let mut evm = self.evm_config.evm_with_env(&mut *db, self.evm_env.clone());
+
+        let ResultAndState { result, state } = match evm.transact(&signed_tx) {
+            Ok(res) => res,
+            Err(err) => {
+                debug!(
+                    target: "payload_builder",
+                    message = "AA bundle transaction EVM error",
+                    error = ?err,
+                );
+                return Ok(false);
+            }
+        };
+
+        let gas_used = result.gas_used();
+
+        // Check if successful
+        if !result.is_success() {
+            debug!(
+                target: "payload_builder",
+                message = "AA bundle transaction reverted",
+                gas_used = gas_used,
+            );
+            return Ok(false);
+        }
+
+        // Update cumulative gas
+        info.cumulative_gas_used += gas_used;
+
+        // Build receipt
+        let receipt_ctx = ReceiptBuilderCtx {
+            tx: signed_tx.inner(),
+            evm: &evm,
+            result,
+            state: &state,
+            cumulative_gas_used: info.cumulative_gas_used,
+        };
+        info.receipts.push(self.build_receipt(receipt_ctx, None));
+
+        // Commit state changes
+        evm.db_mut().commit(state);
+
+        // Add to executed transactions
+        info.executed_senders.push(signer.address);
+        info.executed_transactions.push(signed_tx.into_inner());
+
+        info!(
+            target: "payload_builder",
+            message = "AA bundle executed successfully",
+            entry_point = ?bundle.entry_point,
+            num_ops = bundle.num_ops,
+            gas_used = gas_used,
+        );
+
+        Ok(true)
     }
 }

@@ -283,6 +283,10 @@ where
             max_gas_per_txn: self.config.max_gas_per_txn,
             address_gas_limiter: self.address_gas_limiter.clone(),
             resource_metering: self.config.resource_metering.clone(),
+            aa_bundler_enabled: self.config.enable_aa_bundler,
+            aa_bundler_signer: self.config.aa_bundler_signer,
+            aa_gas_threshold: self.config.aa_gas_threshold,
+            aa_gas_reserve: self.config.aa_gas_reserve_percentage,
         })
     }
 
@@ -690,6 +694,34 @@ where
             target_da_footprint_for_batch,
         )
         .wrap_err("failed to execute best transactions")?;
+
+        // Execute AA bundles if threshold is reached
+        // AA bundles are placed after EOA transactions ("middle" of flashblock)
+        if ctx.is_aa_bundler_ready() {
+            match ctx.execute_aa_bundles(info, state) {
+                Ok(bundles_executed) if bundles_executed > 0 => {
+                    info!(
+                        target: "payload_builder",
+                        message = "Executed AA bundles in flashblock",
+                        flashblock_index = flashblock_index,
+                        bundles_executed = bundles_executed,
+                        cumulative_gas = info.cumulative_gas_used,
+                    );
+                }
+                Ok(_) => {
+                    // No bundles executed (threshold not reached or pool empty)
+                }
+                Err(e) => {
+                    error!(
+                        target: "payload_builder",
+                        message = "Failed to execute AA bundles in flashblock",
+                        flashblock_index = flashblock_index,
+                        error = ?e,
+                    );
+                }
+            }
+        }
+
         // Extract last transactions
         let new_transactions = info.executed_transactions[info.extra.last_flashblock_index..]
             .to_vec()
