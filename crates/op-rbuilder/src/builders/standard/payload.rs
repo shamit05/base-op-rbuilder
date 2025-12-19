@@ -266,21 +266,29 @@ where
         let state_provider = self.client.state_by_block_hash(ctx.parent().hash())?;
         let db = StateProviderDatabase::new(&state_provider);
         let metrics = ctx.metrics.clone();
-        if ctx.attributes().no_tx_pool {
+
+        // Use tokio's block_on to bridge sync trait to async implementation
+        let handle = tokio::runtime::Handle::current();
+        let result = if ctx.attributes().no_tx_pool {
             let state = State::builder()
                 .with_database(db)
                 .with_bundle_update()
                 .build();
-            builder.build(state, &state_provider, ctx, self.builder_tx.clone())
+            handle.block_on(async {
+                builder.build(state, &state_provider, ctx, self.builder_tx.clone()).await
+            })
         } else {
             // sequencer mode we can reuse cachedreads from previous runs
             let state = State::builder()
                 .with_database(cached_reads.as_db_mut(db))
                 .with_bundle_update()
                 .build();
-            builder.build(state, &state_provider, ctx, self.builder_tx.clone())
-        }
-        .map(|out| {
+            handle.block_on(async {
+                builder.build(state, &state_provider, ctx, self.builder_tx.clone()).await
+            })
+        };
+
+        result.map(|out| {
             let total_block_building_time = block_build_start_time.elapsed();
             metrics
                 .total_block_built_duration
@@ -332,7 +340,7 @@ pub(super) struct ExecutedPayload {
 
 impl<Txs: PayloadTxsBounds> OpBuilder<'_, Txs> {
     /// Executes the payload and returns the outcome.
-    pub(crate) fn execute<BuilderTx>(
+    pub(crate) async fn execute<BuilderTx>(
         self,
         state_provider: impl StateProvider,
         db: &mut State<impl Database>,
@@ -429,7 +437,7 @@ impl<Txs: PayloadTxsBounds> OpBuilder<'_, Txs> {
             // Execute AA bundles if threshold is reached
             // AA bundles are placed after EOA transactions ("middle" of block)
             if ctx.is_aa_bundler_ready() {
-                match ctx.execute_aa_bundles(&mut info, db) {
+                match ctx.execute_aa_bundles(&mut info, db).await {
                     Ok(bundles_executed) if bundles_executed > 0 => {
                         info!(
                             target: "payload_builder",
@@ -485,7 +493,7 @@ impl<Txs: PayloadTxsBounds> OpBuilder<'_, Txs> {
     }
 
     /// Builds the payload on top of the state.
-    pub(super) fn build<BuilderTx>(
+    pub(super) async fn build<BuilderTx>(
         self,
         state: impl Database,
         state_provider: impl StateProvider,
@@ -500,7 +508,7 @@ impl<Txs: PayloadTxsBounds> OpBuilder<'_, Txs> {
             .with_bundle_update()
             .build();
         let ExecutedPayload { info } =
-            match self.execute(&state_provider, &mut db, &ctx, builder_tx)? {
+            match self.execute(&state_provider, &mut db, &ctx, builder_tx).await? {
                 BuildOutcomeKind::Better { payload } | BuildOutcomeKind::Freeze(payload) => payload,
                 BuildOutcomeKind::Cancelled => return Ok(BuildOutcomeKind::Cancelled),
                 BuildOutcomeKind::Aborted { fees } => {

@@ -37,7 +37,6 @@
 mod bundle;
 mod bundler;
 mod gas_tracker;
-pub mod mempool_service;
 
 pub use bundle::{
     BundleBuilder, BundleConfig, BundleTransaction, IEntryPointV06, IEntryPointV07,
@@ -45,7 +44,6 @@ pub use bundle::{
     BUNDLE_TRANSACTION_GAS_OVERHEAD_PERCENT, ENTRY_POINT_INNER_GAS_OVERHEAD_V06,
     ENTRY_POINT_INNER_GAS_OVERHEAD_V07, MAX_BUNDLE_GAS,
 };
-pub use bundler::{entry_points, BundleResult, Bundler};
+pub use bundler::{entry_points, BundleResult, Bundler, SharedMempool};
 pub use gas_tracker::{GasReservation, GasTracker};
-pub use mempool_service::{MempoolImpl, MempoolService, MempoolServiceConfig, SharedMempool, SharedMempoolClient};
 

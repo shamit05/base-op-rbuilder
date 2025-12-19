@@ -20,7 +20,7 @@ use reth_optimism_primitives::OpTransactionSigned;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(super) struct OpPayloadSyncerCtx {
     /// The type that knows how to perform system calls and configure the evm.
     evm_config: OpEvmConfig,

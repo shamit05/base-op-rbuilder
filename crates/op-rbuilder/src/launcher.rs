@@ -1,10 +1,11 @@
+use account_abstraction_core::{InMemoryMempool, PoolConfig};
 use eyre::Result;
 use reth_optimism_rpc::OpEthApiBuilder;
+use tokio::sync::RwLock;
 
 use crate::{
     args::*,
     builders::{BuilderConfig, BuilderMode, FlashblocksBuilder, PayloadBuilder, StandardBuilder},
-    bundler::mempool_service::MempoolService,
     metrics::{VERSION, record_flag_gauge_metrics},
     monitor_tx_pool::monitor_tx_pool,
     primitives::reth::engine_api_builder::OpEngineApiBuilder,
@@ -112,9 +113,12 @@ where
                 kafka_topic = %builder_config.aa_kafka_topic,
             );
             
-            #[allow(unused_mut)]
-            let mut mempool_service = MempoolService::new_without_kafka(builder_config.aa_min_fee_per_gas);
-            builder_config.aa_mempool = Some(mempool_service.mempool());
+            let mempool_service = Arc::new(RwLock::new(InMemoryMempool::new(
+                PoolConfig {
+                    minimum_max_fee_per_gas: builder_config.aa_min_fee_per_gas,
+                }
+            )));
+            builder_config.aa_mempool = Some(mempool_service);
             
             // Start Kafka consumer if configured
             #[cfg(feature = "kafka")]

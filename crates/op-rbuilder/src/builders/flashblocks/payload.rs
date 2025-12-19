@@ -699,7 +699,7 @@ where
         // Execute AA bundles if threshold is reached
         // AA bundles are placed after EOA transactions ("middle" of flashblock)
         if ctx.is_aa_bundler_ready() {
-            match ctx.execute_aa_bundles(info, state) {
+            match ctx.execute_aa_bundles(info, state).await {
                 Ok(bundles_executed) if bundles_executed > 0 => {
                     info!(
                         target: "payload_builder",

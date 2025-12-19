@@ -660,7 +660,7 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
     /// 5. Removes included ops from mempool
     ///
     /// Returns the number of AA bundle transactions executed
-    pub(super) fn execute_aa_bundles<E: Debug + Default>(
+    pub(super) async fn execute_aa_bundles<E: Debug + Default>(
         &self,
         info: &mut ExecutionInfo<E>,
         db: &mut State<impl Database>,
@@ -686,7 +686,7 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
         );
 
         // Check if we should build bundles at current gas usage
-        if !bundler.should_build_bundles(info.cumulative_gas_used) {
+        if !bundler.should_build_bundles(info.cumulative_gas_used).await {
             return Ok(0);
         }
 
@@ -695,7 +695,7 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
         let priority_fee = 1_000_000_000u128; // 1 gwei
 
         // Build bundles from the pool
-        let bundle_result = bundler.build_bundles(base_fee, priority_fee);
+        let bundle_result = bundler.build_bundles(base_fee, priority_fee).await;
 
         if bundle_result.bundles.is_empty() {
             debug!(
@@ -748,7 +748,7 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
 
         // Remove successfully included operations from the mempool
         if bundles_executed > 0 {
-            bundler.remove_included_operations(&bundle_result.bundles);
+            bundler.remove_included_operations(&bundle_result.bundles).await;
         }
 
         Ok(bundles_executed)

@@ -5,6 +5,7 @@ version = 4
 [[package]]
 name = "account-abstraction-core"
 version = "0.1.0"
+source = "git+https://github.com/base/tips?rev=ea1bd09272749aa79739838c9e847cd4d8b6258b#ea1bd09272749aa79739838c9e847cd4d8b6258b"
 dependencies = [
  "alloy-primitives 1.4.1",
  "alloy-provider",
@@ -15,9 +16,13 @@ dependencies = [
  "async-trait",
  "jsonrpsee 0.26.0",
  "op-alloy-network",
+ "rdkafka",
  "reth-rpc-eth-types",
  "serde",
+ "serde_json",
+ "tips-core 0.1.0 (git+https://github.com/base/tips?rev=ea1bd09272749aa79739838c9e847cd4d8b6258b)",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -7225,7 +7230,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tikv-jemallocator",
  "time",
- "tips-core",
+ "tips-core 0.1.0 (git+https://github.com/base/tips?rev=c08eaa4fe10c26de8911609b41ddab4918698325)",
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
@@ -7288,6 +7293,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d05e27ee213611ffe7d6348b942e8f942b37114c00cc03cec254295a4a17852e"
 
 [[package]]
+name = "openssl-src"
+version = "300.5.4+3.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a507b3792995dae9b0df8a1c1e3771e8418b7c2d9f0baeba32e6fe8b06c7cb72"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "openssl-sys"
 version = "0.9.111"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7295,6 +7309,7 @@ checksum = "82cab2d520aa75e3c58898289429321eb788c3106963d0dc886ec7a5f4adc321"
 dependencies = [
  "cc",
  "libc",
+ "openssl-src",
  "pkg-config",
  "vcpkg",
 ]
@@ -8425,7 +8440,9 @@ dependencies = [
  "libc",
  "libz-sys",
  "num_enum",
+ "openssl-sys",
  "pkg-config",
+ "zstd-sys",
 ]
 
 [[package]]
@@ -13422,6 +13439,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "tips-core"
+version = "0.1.0"
+source = "git+https://github.com/base/tips?rev=ea1bd09272749aa79739838c9e847cd4d8b6258b#ea1bd09272749aa79739838c9e847cd4d8b6258b"
+dependencies = [
+ "alloy-consensus",
+ "alloy-primitives 1.4.1",
+ "alloy-provider",
+ "alloy-rpc-types",
+ "alloy-serde",
+ "metrics-exporter-prometheus 0.17.2",
+ "op-alloy-consensus",
+ "op-alloy-flz",
+ "serde",
+ "tracing",
+ "tracing-subscriber 0.3.20",
+ "uuid",
+]
+
+[[package]]
 name = "tokio"
 version = "1.48.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -15441,6 +15477,7 @@ version = "2.0.16+zstd.1.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "91e19ebc2adc8f83e43039e79776e3fda8ca919132d68a1fed6a5faca2683748"
 dependencies = [
+ "bindgen 0.72.1",
  "cc",
  "pkg-config",
 ]

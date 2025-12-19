@@ -6,17 +6,19 @@ use std::sync::Arc;
 
 use alloy_primitives::Bytes;
 use alloy_sol_types::SolCall;
+use tokio::sync::RwLock;
 
 use super::{
     bundle::{
         BundleBuilder, BundleTransaction, IEntryPointV06, IEntryPointV07, PackedUserOperation,
         UserOpGasInfo, UserOperation as SolUserOperation,
     },
-    gas_tracker::GasTracker,
-    mempool_service::SharedMempool,
+    gas_tracker::GasTracker
 };
 use crate::tx_signer::Signer;
-use account_abstraction_core::types::WrappedUserOperation;
+use account_abstraction_core::{PoolConfig, domain::WrappedUserOperation};
+use account_abstraction_core::domain::Mempool;
+use account_abstraction_core::InMemoryMempool;
 
 /// Known EntryPoint addresses
 pub mod entry_points {
@@ -27,6 +29,8 @@ pub mod entry_points {
     /// EntryPoint v0.7 address
     pub const V07: Address = address!("0000000071727De22E5E9d8BAf0edAc6f37da032");
 }
+
+pub type SharedMempool = Arc<RwLock<dyn Mempool>>;
 
 /// The main bundler that orchestrates AA bundle creation
 pub struct Bundler {
@@ -61,7 +65,7 @@ impl Bundler {
     /// * `threshold_percentage` - Gas percentage at which to build bundles (e.g., 50)
     /// * `reserve_percentage` - Gas percentage reserved for bundles (e.g., 20)
     pub fn new(
-        mempool: SharedMempool,
+        mempool: Arc<RwLock<dyn Mempool>>,
         signer: Signer,
         block_gas_limit: u64,
         threshold_percentage: u8,
@@ -86,11 +90,8 @@ impl Bundler {
 
     /// Create a disabled bundler (for when AA bundling is off)
     pub fn disabled() -> Self {
-        use parking_lot::RwLock;
-        use super::mempool_service::MempoolImpl;
-        
         // Create an empty mempool
-        let empty_mempool = Arc::new(RwLock::new(MempoolImpl::new(0)));
+        let empty_mempool = Arc::new(RwLock::new(InMemoryMempool::new(PoolConfig::default())));
         let signer = Signer::random();
         
         Self {
@@ -107,14 +108,14 @@ impl Bundler {
     }
 
     /// Check if we should build bundles at the current gas usage
-    pub fn should_build_bundles(&self, cumulative_gas_used: u64) -> bool {
+    pub async fn should_build_bundles(&self, cumulative_gas_used: u64) -> bool {
         if !self.enabled {
             return false;
         }
         
         // Check if mempool has any operations
-        let pool = self.mempool.read();
-        if pool.is_empty() {
+        let pool = self.mempool.read().await;
+        if pool.get_top_operations(1).is_empty() {
             return false;
         }
         drop(pool);
@@ -127,7 +128,7 @@ impl Bundler {
     /// Build bundle transactions from the mempool
     ///
     /// Returns bundle transactions ready for execution
-    pub fn build_bundles(&self, base_fee: u128, priority_fee: u128) -> BundleResult {
+    pub async fn build_bundles(&self, base_fee: u128, priority_fee: u128) -> BundleResult {
         if !self.enabled {
             return BundleResult {
                 bundles: vec![],
@@ -141,8 +142,8 @@ impl Bundler {
 
         // Fetch operations from mempool
         let operations: Vec<Arc<WrappedUserOperation>> = {
-            let pool = self.mempool.read();
-            pool.get_top_operations(max_ops).collect()
+            let pool = self.mempool.read().await;
+            pool.get_top_operations(max_ops)
         };
 
         if operations.is_empty() {
@@ -186,9 +187,9 @@ impl Bundler {
     }
 
     /// Remove operations that were included in bundles from the mempool
-    pub fn remove_included_operations(&self, bundles: &[BundleTransaction]) {
+    pub async fn remove_included_operations(&self, bundles: &[BundleTransaction]) {
         use alloy_primitives::B256;
-        let mut pool = self.mempool.write();
+        let mut pool = self.mempool.write().await;
         for bundle in bundles {
             for hash in &bundle.op_hashes {
                 let _ = pool.remove_operation(&B256::from(*hash));
@@ -214,10 +215,10 @@ impl Bundler {
         for op in operations {
             // Check the operation type to determine version
             match &op.operation {
-                account_abstraction_core::types::VersionedUserOperation::UserOperation(_) => {
+                account_abstraction_core::domain::VersionedUserOperation::UserOperation(_) => {
                     v06_ops.push(Arc::clone(op));
                 }
-                account_abstraction_core::types::VersionedUserOperation::PackedUserOperation(_) => {
+                account_abstraction_core::domain::VersionedUserOperation::PackedUserOperation(_) => {
                     v07_ops.push(Arc::clone(op));
                 }
             }
@@ -243,7 +244,7 @@ impl Bundler {
         let mut op_hashes = Vec::new();
 
         for op in operations {
-            if let account_abstraction_core::types::VersionedUserOperation::UserOperation(
+            if let account_abstraction_core::domain::VersionedUserOperation::UserOperation(
                 ref user_op,
             ) = op.operation
             {
@@ -298,7 +299,7 @@ impl Bundler {
         let mut op_hashes = Vec::new();
 
         for op in operations {
-            if let account_abstraction_core::types::VersionedUserOperation::PackedUserOperation(
+            if let account_abstraction_core::domain::VersionedUserOperation::PackedUserOperation(
                 ref packed_op,
             ) = op.operation
             {
@@ -423,12 +424,13 @@ fn convert_v07_packed_op(op: &alloy_rpc_types_eth::PackedUserOperation) -> Packe
 mod tests {
     use super::*;
     use alloy_primitives::{Address, B256, U256};
-    use parking_lot::RwLock;
-    use super::super::mempool_service::MempoolImpl;
-    use account_abstraction_core::types::{VersionedUserOperation, WrappedUserOperation};
+    use tokio::sync::RwLock;
+    use account_abstraction_core::domain::{VersionedUserOperation, WrappedUserOperation};
 
     fn create_test_mempool() -> SharedMempool {
-        Arc::new(RwLock::new(MempoolImpl::new(0)))
+        Arc::new(RwLock::new(InMemoryMempool::new(PoolConfig {
+            minimum_max_fee_per_gas: 0,
+        })))
     }
 
     /// Create a mock v0.6 UserOperation for testing
@@ -456,33 +458,33 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_bundler_disabled() {
+    #[tokio::test]
+    async fn test_bundler_disabled() {
         let bundler = Bundler::disabled();
         assert!(!bundler.is_enabled());
-        assert!(!bundler.should_build_bundles(1_000_000));
+        assert!(!bundler.should_build_bundles(1_000_000).await);
     }
 
-    #[test]
-    fn test_bundler_empty_mempool() {
+    #[tokio::test]
+    async fn test_bundler_empty_mempool() {
         let mempool = create_test_mempool();
         let signer = Signer::random();
         let bundler = Bundler::new(mempool, signer, 30_000_000, 50, 20);
 
         // Should not build bundles when mempool is empty
-        assert!(!bundler.should_build_bundles(20_000_000));
+        assert!(!bundler.should_build_bundles(20_000_000).await);
     }
 
-    #[test]
-    fn test_bundler_threshold_check() {
+    #[tokio::test]
+    async fn test_bundler_threshold_check() {
         let mempool = create_test_mempool();
         let signer = Signer::random();
         let bundler = Bundler::new(mempool, signer, 30_000_000, 50, 20);
 
         // Without operations in mempool, should always be false
-        assert!(!bundler.should_build_bundles(0));
-        assert!(!bundler.should_build_bundles(15_000_000));
-        assert!(!bundler.should_build_bundles(25_000_000));
+        assert!(!bundler.should_build_bundles(0).await);
+        assert!(!bundler.should_build_bundles(15_000_000).await);
+        assert!(!bundler.should_build_bundles(25_000_000).await);
     }
 
     #[test]
@@ -498,13 +500,13 @@ mod tests {
         assert_eq!(bundler.estimate_max_ops(10_000), 1);
     }
 
-    #[test]
-    fn test_build_bundles_empty() {
+    #[tokio::test]
+    async fn test_build_bundles_empty() {
         let mempool = create_test_mempool();
         let signer = Signer::random();
         let bundler = Bundler::new(mempool, signer, 30_000_000, 50, 20);
 
-        let result = bundler.build_bundles(1_000_000_000, 100_000_000);
+        let result = bundler.build_bundles(1_000_000_000, 100_000_000).await;
         assert!(result.bundles.is_empty());
         assert_eq!(result.total_ops, 0);
     }
@@ -513,15 +515,15 @@ mod tests {
     // End-to-End Tests: Mempool -> Bundle Creation
     // ========================================================================
 
-    #[test]
-    fn test_e2e_single_user_op_creates_bundle() {
+    #[tokio::test]
+    async fn test_e2e_single_user_op_creates_bundle() {
         // Create mempool and add a UserOperation
         let mempool = create_test_mempool();
         let sender = Address::random();
         let user_op = create_mock_user_op_v06(sender, 0, 10_000_000_000); // 10 gwei
 
         {
-            let mut pool = mempool.write();
+            let mut pool = mempool.write().await;
             pool.add_operation(&user_op).expect("Failed to add operation");
         }
 
@@ -531,20 +533,20 @@ mod tests {
 
         // Verify mempool is not empty
         {
-            let pool = mempool.read();
-            assert!(!pool.is_empty(), "Mempool should have one operation");
+            let pool = mempool.read().await;
+            assert!(!pool.get_top_operations(1).is_empty(), "Mempool should have one operation");
         }
 
         // At 50% threshold with 20% reserve, should build bundles when > 15M gas used
         assert!(
-            bundler.should_build_bundles(16_000_000),
+            bundler.should_build_bundles(16_000_000).await,
             "Should build bundles after threshold"
         );
 
         // Build bundles
         let base_fee = 1_000_000_000u128; // 1 gwei
         let priority_fee = 100_000_000u128; // 0.1 gwei
-        let result = bundler.build_bundles(base_fee, priority_fee);
+        let result = bundler.build_bundles(base_fee, priority_fee).await;
 
         // Should have created one bundle for v0.6
         assert_eq!(result.bundles.len(), 1, "Should have one bundle");
@@ -561,8 +563,8 @@ mod tests {
         assert_eq!(bundle.op_hashes[0], user_op.hash.0, "Op hash should match");
     }
 
-    #[test]
-    fn test_e2e_multiple_user_ops_creates_bundle() {
+    #[tokio::test]
+    async fn test_e2e_multiple_user_ops_creates_bundle() {
         // Create mempool and add multiple UserOperations
         let mempool = create_test_mempool();
         let mut op_hashes = Vec::new();
@@ -572,7 +574,7 @@ mod tests {
             let user_op = create_mock_user_op_v06(sender, 0, 10_000_000_000 + i as u128); // varying fees
             op_hashes.push(user_op.hash);
 
-            let mut pool = mempool.write();
+            let mut pool = mempool.write().await;
             pool.add_operation(&user_op).expect("Failed to add operation");
         }
 
@@ -581,7 +583,7 @@ mod tests {
         let bundler = Bundler::new(mempool.clone(), signer, 30_000_000, 50, 20);
 
         // Build bundles
-        let result = bundler.build_bundles(1_000_000_000, 100_000_000);
+        let result = bundler.build_bundles(1_000_000_000, 100_000_000).await;
 
         // Should have created one bundle with all 5 ops
         assert_eq!(result.bundles.len(), 1, "Should have one bundle");
@@ -592,8 +594,8 @@ mod tests {
         assert_eq!(bundle.op_hashes.len(), 5, "Should have 5 op hashes");
     }
 
-    #[test]
-    fn test_e2e_remove_operations_after_bundle() {
+    #[tokio::test]
+    async fn test_e2e_remove_operations_after_bundle() {
         // Create mempool and add UserOperations
         let mempool = create_test_mempool();
         let sender = Address::random();
@@ -601,48 +603,48 @@ mod tests {
         let _op_hash = user_op.hash;
 
         {
-            let mut pool = mempool.write();
+            let mut pool = mempool.write().await;
             pool.add_operation(&user_op).expect("Failed to add operation");
-            assert!(!pool.is_empty(), "Mempool should have one operation");
+            assert!(!pool.get_top_operations(1).is_empty(), "Mempool should have one operation");
         }
 
         // Create bundler and build bundles
         let signer = Signer::random();
         let bundler = Bundler::new(mempool.clone(), signer, 30_000_000, 50, 20);
-        let result = bundler.build_bundles(1_000_000_000, 100_000_000);
+        let result = bundler.build_bundles(1_000_000_000, 100_000_000).await;
 
         assert_eq!(result.bundles.len(), 1, "Should have one bundle");
 
         // Remove included operations (simulating successful on-chain inclusion)
-        bundler.remove_included_operations(&result.bundles);
+        bundler.remove_included_operations(&result.bundles).await;
 
         // Mempool should now be empty
         {
-            let pool = mempool.read();
-            assert!(pool.is_empty(), "Mempool should be empty after removal");
+            let pool = mempool.read().await;
+            assert!(pool.get_top_operations(1).is_empty(), "Mempool should be empty after removal");
         }
 
         // Building again should produce no bundles
-        let result2 = bundler.build_bundles(1_000_000_000, 100_000_000);
+        let result2 = bundler.build_bundles(1_000_000_000, 100_000_000).await;
         assert!(result2.bundles.is_empty(), "Should have no bundles after removal");
     }
 
-    #[test]
-    fn test_e2e_bundle_has_valid_calldata() {
+    #[tokio::test]
+    async fn test_e2e_bundle_has_valid_calldata() {
         // Create mempool and add a UserOperation
         let mempool = create_test_mempool();
         let sender = Address::random();
         let user_op = create_mock_user_op_v06(sender, 0, 10_000_000_000);
 
         {
-            let mut pool = mempool.write();
+            let mut pool = mempool.write().await;
             pool.add_operation(&user_op).expect("Failed to add operation");
         }
 
         // Create bundler and build bundles
         let signer = Signer::random();
         let bundler = Bundler::new(mempool, signer, 30_000_000, 50, 20);
-        let result = bundler.build_bundles(1_000_000_000, 100_000_000);
+        let result = bundler.build_bundles(1_000_000_000, 100_000_000).await;
 
         let bundle = &result.bundles[0];
 
@@ -661,15 +663,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_e2e_gas_fees_in_bundle() {
+    #[tokio::test]
+    async fn test_e2e_gas_fees_in_bundle() {
         // Create mempool and add a UserOperation
         let mempool = create_test_mempool();
         let sender = Address::random();
         let user_op = create_mock_user_op_v06(sender, 0, 10_000_000_000);
 
         {
-            let mut pool = mempool.write();
+            let mut pool = mempool.write().await;
             pool.add_operation(&user_op).expect("Failed to add operation");
         }
 
@@ -679,7 +681,7 @@ mod tests {
 
         let base_fee = 2_000_000_000u128; // 2 gwei
         let priority_fee = 500_000_000u128; // 0.5 gwei
-        let result = bundler.build_bundles(base_fee, priority_fee);
+        let result = bundler.build_bundles(base_fee, priority_fee).await;
 
         let bundle = &result.bundles[0];
 
@@ -696,8 +698,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_e2e_priority_ordering() {
+    #[tokio::test]
+    async fn test_e2e_priority_ordering() {
         // Create mempool and add UserOperations with different fees
         let mempool = create_test_mempool();
 
@@ -712,7 +714,7 @@ mod tests {
         let op3 = create_mock_user_op_v06(senders[2], 0, 10_000_000_000);
 
         {
-            let mut pool = mempool.write();
+            let mut pool = mempool.write().await;
             pool.add_operation(&op1).expect("Failed to add op1");
             pool.add_operation(&op2).expect("Failed to add op2");
             pool.add_operation(&op3).expect("Failed to add op3");
@@ -721,7 +723,7 @@ mod tests {
         // Create bundler and build bundles
         let signer = Signer::random();
         let bundler = Bundler::new(mempool, signer, 30_000_000, 50, 20);
-        let result = bundler.build_bundles(1_000_000_000, 100_000_000);
+        let result = bundler.build_bundles(1_000_000_000, 100_000_000).await;
 
         // Should have all 3 ops
         assert_eq!(result.total_ops, 3, "Should have 3 ops");
