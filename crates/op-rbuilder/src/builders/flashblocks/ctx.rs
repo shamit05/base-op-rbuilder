@@ -1,5 +1,6 @@
 use crate::{
     builders::{BuilderConfig, OpPayloadBuilderCtx, flashblocks::FlashblocksConfig},
+    bundler::SharedMempool,
     gas_limiter::{AddressGasLimiter, args::GasLimiterArgs},
     metrics::OpRBuilderMetrics,
     resource_metering::ResourceMetering,
@@ -41,6 +42,8 @@ pub(super) struct OpPayloadSyncerCtx {
     aa_gas_threshold: u8,
     /// Gas reserve percentage (how much gas to reserve for bundles)
     aa_gas_reserve: u8,
+    /// Shared mempool for AA UserOperations
+    aa_mempool: Option<SharedMempool>,
 }
 
 impl OpPayloadSyncerCtx {
@@ -65,6 +68,7 @@ impl OpPayloadSyncerCtx {
             aa_bundler_signer: builder_config.aa_bundler_signer,
             aa_gas_threshold: builder_config.aa_gas_threshold,
             aa_gas_reserve: builder_config.aa_gas_reserve_percentage,
+            aa_mempool: builder_config.aa_mempool.clone(),
         })
     }
 
@@ -102,6 +106,7 @@ impl OpPayloadSyncerCtx {
             aa_bundler_signer: self.aa_bundler_signer,
             aa_gas_threshold: self.aa_gas_threshold,
             aa_gas_reserve: self.aa_gas_reserve,
+            aa_mempool: self.aa_mempool.clone(),
         }
     }
 }

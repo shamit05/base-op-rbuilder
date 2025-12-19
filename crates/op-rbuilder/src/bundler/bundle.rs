@@ -430,7 +430,7 @@ impl BundleBuilder {
 
 /// Increase a value by a percentage
 /// (val * (100 + percent)) / 100
-pub fn increase_by_percent(val: u128, percent: u128) -> u128 {
+pub(crate) fn increase_by_percent(val: u128, percent: u128) -> u128 {
     val.saturating_mul(100 + percent) / 100
 }
 

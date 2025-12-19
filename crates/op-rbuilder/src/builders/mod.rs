@@ -9,6 +9,7 @@ use reth_optimism_payload_builder::config::{OpDAConfig, OpGasLimitConfig};
 
 use crate::{
     args::OpRbuilderArgs,
+    bundler::SharedMempool,
     flashtestations::args::FlashtestationsArgs,
     gas_limiter::args::GasLimiterArgs,
     traits::{NodeBounds, PoolBounds},
@@ -144,8 +145,23 @@ pub struct BuilderConfig<Specific: Clone> {
     /// Threshold before reserving gas for AA bundles
     pub aa_gas_threshold: u8,
 
-    /// UserOperation pool connection URL
+    /// UserOperation pool connection URL (for remote pool, if not using local mempool)
     pub aa_pool_url: Option<String>,
+
+    /// Kafka brokers for AA mempool (e.g., "localhost:9092")
+    pub aa_kafka_brokers: Option<String>,
+
+    /// Kafka topic for UserOperations
+    pub aa_kafka_topic: String,
+
+    /// Kafka consumer group ID
+    pub aa_kafka_consumer_group: String,
+
+    /// Minimum max_fee_per_gas for UserOperations (in wei)
+    pub aa_min_fee_per_gas: u128,
+
+    /// Shared mempool for AA UserOperations (created once at startup)
+    pub aa_mempool: Option<SharedMempool>,
 }
 
 impl<S: Debug + Clone> core::fmt::Debug for BuilderConfig<S> {
@@ -204,6 +220,11 @@ impl<S: Default + Clone> Default for BuilderConfig<S> {
             aa_gas_reserve_percentage: 20,
             aa_gas_threshold: 30,
             aa_pool_url: None,
+            aa_kafka_brokers: None,
+            aa_kafka_topic: "tips-userop".to_string(),
+            aa_kafka_consumer_group: "op-rbuilder-bundler".to_string(),
+            aa_min_fee_per_gas: 1_000_000_000, // 1 gwei
+            aa_mempool: None,
         }
     }
 }
@@ -235,6 +256,11 @@ where
             aa_gas_reserve_percentage: args.aa_gas_reserve_percentage,
             aa_gas_threshold: args.aa_gas_threshold,
             aa_pool_url: args.aa_pool_url.clone(),
+            aa_kafka_brokers: args.aa_kafka_brokers.clone(),
+            aa_kafka_topic: args.aa_kafka_topic.clone(),
+            aa_kafka_consumer_group: args.aa_kafka_consumer_group.clone(),
+            aa_min_fee_per_gas: args.aa_min_fee_per_gas,
+            aa_mempool: None, // Created separately during service startup
             specific: S::try_from(args)?,
         })
     }

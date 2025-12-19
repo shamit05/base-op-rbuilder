@@ -108,6 +108,38 @@ pub struct OpRbuilderArgs {
     /// UserOperation pool URL (if not provided, AA bundling is disabled)
     #[arg(long = "aa.pool-url", env = "AA_POOL_URL")]
     pub aa_pool_url: Option<String>,
+
+    /// Kafka broker URL for AA mempool (e.g., localhost:9092)
+    #[arg(long = "aa.kafka-brokers", env = "AA_KAFKA_BROKERS")]
+    pub aa_kafka_brokers: Option<String>,
+
+    /// Kafka topic for UserOperations
+    #[arg(
+        long = "aa.kafka-topic",
+        default_value = "tips-userop",
+        env = "AA_KAFKA_TOPIC"
+    )]
+    pub aa_kafka_topic: String,
+
+    /// Kafka consumer group ID
+    #[arg(
+        long = "aa.kafka-consumer-group",
+        default_value = "op-rbuilder-bundler",
+        env = "AA_KAFKA_CONSUMER_GROUP"
+    )]
+    pub aa_kafka_consumer_group: String,
+
+    /// Path to Kafka properties file for additional configuration
+    #[arg(long = "aa.kafka-properties", env = "AA_KAFKA_PROPERTIES")]
+    pub aa_kafka_properties: Option<PathBuf>,
+
+    /// Minimum max_fee_per_gas for UserOperations (in wei)
+    #[arg(
+        long = "aa.min-fee-per-gas",
+        default_value = "1000000000",
+        env = "AA_MIN_FEE_PER_GAS"
+    )]
+    pub aa_min_fee_per_gas: u128,
 }
 
 impl Default for OpRbuilderArgs {

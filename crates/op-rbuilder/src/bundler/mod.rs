@@ -37,17 +37,15 @@
 mod bundle;
 mod bundler;
 mod gas_tracker;
-mod pool_client;
+pub mod mempool_service;
 
 pub use bundle::{
-    increase_by_percent, BundleBuilder, BundleConfig, BundleTransaction, PackedUserOperation,
-    UserOpGasInfo, UserOperation, BUNDLE_SHARED_GAS, BUNDLE_TRANSACTION_GAS_OVERHEAD_PERCENT,
-    ENTRY_POINT_INNER_GAS_OVERHEAD_V06, ENTRY_POINT_INNER_GAS_OVERHEAD_V07, MAX_BUNDLE_GAS,
+    BundleBuilder, BundleConfig, BundleTransaction, IEntryPointV06, IEntryPointV07,
+    PackedUserOperation, UserOpGasInfo, UserOperation, BUNDLE_SHARED_GAS,
+    BUNDLE_TRANSACTION_GAS_OVERHEAD_PERCENT, ENTRY_POINT_INNER_GAS_OVERHEAD_V06,
+    ENTRY_POINT_INNER_GAS_OVERHEAD_V07, MAX_BUNDLE_GAS,
 };
 pub use bundler::{entry_points, BundleResult, Bundler};
 pub use gas_tracker::{GasReservation, GasTracker};
-pub use pool_client::{
-    NoOpPoolClient, OperationGasInfo, PoolClient, PoolClientError, PoolOperation, UserOpHash,
-    UserOperationV06, UserOperationV07, UserOperationVariant,
-};
+pub use mempool_service::{MempoolImpl, MempoolService, MempoolServiceConfig, SharedMempool, SharedMempoolClient};
 

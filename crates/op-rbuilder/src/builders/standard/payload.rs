@@ -256,6 +256,7 @@ where
             aa_bundler_signer: self.config.aa_bundler_signer,
             aa_gas_threshold: self.config.aa_gas_threshold,
             aa_gas_reserve: self.config.aa_gas_reserve_percentage,
+            aa_mempool: self.config.aa_mempool.clone(),
         };
 
         let builder = OpBuilder::new(best);

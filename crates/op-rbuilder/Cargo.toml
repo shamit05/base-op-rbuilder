@@ -15,6 +15,8 @@ workspace = true
 p2p = { path = "../p2p" }
 
 tips-core.workspace = true
+account-abstraction-core.workspace = true
+rdkafka = { version = "0.37", features = ["dynamic-linking"], optional = true }
 
 reth.workspace = true
 reth-optimism-node.workspace = true
@@ -208,6 +210,9 @@ interop = []
 telemetry = ["reth-tracing-otlp", "opentelemetry"]
 
 custom-engine-api = []
+
+# Enable Kafka consumer for AA mempool
+kafka = ["dep:rdkafka"]
 
 [[bin]]
 name = "op-rbuilder"

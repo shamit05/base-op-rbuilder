@@ -4,6 +4,7 @@ use reth_optimism_rpc::OpEthApiBuilder;
 use crate::{
     args::*,
     builders::{BuilderConfig, BuilderMode, FlashblocksBuilder, PayloadBuilder, StandardBuilder},
+    bundler::mempool_service::MempoolService,
     metrics::{VERSION, record_flag_gauge_metrics},
     monitor_tx_pool::monitor_tx_pool,
     primitives::reth::engine_api_builder::OpEngineApiBuilder,
@@ -99,8 +100,59 @@ where
         builder: WithLaunchContext<NodeBuilder<Arc<DatabaseEnv>, OpChainSpec>>,
         builder_args: OpRbuilderArgs,
     ) -> Result<()> {
-        let builder_config = BuilderConfig::<B::Config>::try_from(builder_args.clone())
+        let mut builder_config = BuilderConfig::<B::Config>::try_from(builder_args.clone())
             .expect("Failed to convert rollup args to builder config");
+
+        // Initialize AA mempool if bundler is enabled
+        if builder_config.enable_aa_bundler {
+            tracing::info!(
+                message = "Initializing AA mempool for native bundler",
+                min_fee_per_gas = builder_config.aa_min_fee_per_gas,
+                kafka_brokers = ?builder_config.aa_kafka_brokers,
+                kafka_topic = %builder_config.aa_kafka_topic,
+            );
+            
+            #[allow(unused_mut)]
+            let mut mempool_service = MempoolService::new_without_kafka(builder_config.aa_min_fee_per_gas);
+            builder_config.aa_mempool = Some(mempool_service.mempool());
+            
+            // Start Kafka consumer if configured
+            #[cfg(feature = "kafka")]
+            if let Some(ref kafka_brokers) = builder_config.aa_kafka_brokers {
+                use crate::bundler::mempool_service::MempoolServiceConfig;
+                
+                let kafka_config = MempoolServiceConfig {
+                    kafka_brokers: kafka_brokers.clone(),
+                    kafka_topic: builder_config.aa_kafka_topic.clone(),
+                    consumer_group: builder_config.aa_kafka_consumer_group.clone(),
+                    minimum_max_fee_per_gas: builder_config.aa_min_fee_per_gas,
+                    kafka_properties: None, // TODO: Load from file if specified
+                };
+                
+                tracing::info!(
+                    message = "Starting Kafka consumer for AA mempool",
+                    brokers = %kafka_brokers,
+                    topic = %kafka_config.kafka_topic,
+                    consumer_group = %kafka_config.consumer_group,
+                );
+                
+                if let Err(e) = mempool_service.start_consumer(kafka_config) {
+                    tracing::error!(error = %e, "Failed to start Kafka consumer for AA mempool");
+                } else {
+                    tracing::info!("Kafka consumer started for AA mempool");
+                }
+            }
+            
+            #[cfg(not(feature = "kafka"))]
+            if builder_config.aa_kafka_brokers.is_some() {
+                tracing::warn!(
+                    "Kafka brokers configured but 'kafka' feature is not enabled. \
+                     AA mempool will not receive UserOperations from Kafka."
+                );
+            }
+            
+            tracing::info!("AA mempool initialized");
+        }
 
         record_flag_gauge_metrics(&builder_args);
 

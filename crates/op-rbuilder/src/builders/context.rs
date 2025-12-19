@@ -40,7 +40,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace};
 
 use crate::{
-    bundler::{Bundler, GasTracker, NoOpPoolClient},
+    bundler::{Bundler, GasTracker, SharedMempool},
     gas_limiter::AddressGasLimiter,
     metrics::OpRBuilderMetrics,
     primitives::reth::{ExecutionInfo, TxnExecutionResult},
@@ -89,6 +89,8 @@ pub struct OpPayloadBuilderCtx<ExtraCtx: Debug + Default = ()> {
     pub aa_gas_threshold: u8,
     /// Gas reserve percentage (how much gas to reserve for bundles)
     pub aa_gas_reserve: u8,
+    /// Shared mempool for AA UserOperations
+    pub aa_mempool: Option<SharedMempool>,
 }
 
 impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
@@ -651,11 +653,11 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
     /// Execute AA bundles if threshold is reached
     ///
     /// This method:
-    /// 1. Creates a bundler with the current pool client
-    /// 2. Fetches UserOperations from the pool
-    /// 3. Builds bundle transactions
-    /// 4. Executes them through the EVM
-    /// 5. Updates execution info with results
+    /// 1. Uses the shared mempool to fetch UserOperations
+    /// 2. Builds bundle transactions
+    /// 3. Executes them through the EVM
+    /// 4. Updates execution info with results
+    /// 5. Removes included ops from mempool
     ///
     /// Returns the number of AA bundle transactions executed
     pub(super) fn execute_aa_bundles<E: Debug + Default>(
@@ -671,8 +673,12 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
             return Ok(0);
         }
 
+        let Some(mempool) = &self.aa_mempool else {
+            return Ok(0);
+        };
+
         let bundler = Bundler::new(
-            NoOpPoolClient,
+            mempool.clone(),
             signer.clone(),
             self.block_gas_limit(),
             self.aa_gas_threshold,
@@ -740,9 +746,10 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
             }
         }
 
-        // Remove successfully included operations from the pool
-        // Note: In production, this would go through the pool client
-        // bundler.remove_included_operations(&bundle_result.bundles);
+        // Remove successfully included operations from the mempool
+        if bundles_executed > 0 {
+            bundler.remove_included_operations(&bundle_result.bundles);
+        }
 
         Ok(bundles_executed)
     }
