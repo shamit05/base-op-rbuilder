@@ -1,4 +1,5 @@
-use account_abstraction_core::{InMemoryMempool, PoolConfig};
+#[allow(unused_imports)]
+use account_abstraction_core::{InMemoryMempool, PoolConfig, create_mempool_engine, create_mempool_engine_with_url};
 use eyre::Result;
 use reth_optimism_rpc::OpEthApiBuilder;
 use tokio::sync::RwLock;
@@ -104,56 +105,62 @@ where
         let mut builder_config = BuilderConfig::<B::Config>::try_from(builder_args.clone())
             .expect("Failed to convert rollup args to builder config");
 
+        // Handle for mempool engine task (if started)
+        let mut mempool_engine_handle: Option<tokio::task::JoinHandle<()>> = None;
+
         // Initialize AA mempool if bundler is enabled
         if builder_config.enable_aa_bundler {
+            tracing::info!(
+                message = "AA Native Bundler is ENABLED",
+                bundler_signer = builder_config.aa_bundler_signer.as_ref().map(|s| s.address.to_string()).unwrap_or_else(|| "NOT CONFIGURED".to_string()),
+                gas_threshold = builder_config.aa_gas_threshold,
+                gas_reserve = builder_config.aa_gas_reserve_percentage,
+            );
+
             tracing::info!(
                 message = "Initializing AA mempool for native bundler",
                 min_fee_per_gas = builder_config.aa_min_fee_per_gas,
                 kafka_brokers = ?builder_config.aa_kafka_brokers,
                 kafka_topic = %builder_config.aa_kafka_topic,
             );
-            
+
+            tracing::info!(
+                message = "Creating in-memory AA mempool",
+                pool_type = "InMemoryMempool",
+                minimum_max_fee_per_gas = builder_config.aa_min_fee_per_gas,
+            );
+
             let mempool_service = Arc::new(RwLock::new(InMemoryMempool::new(
                 PoolConfig {
                     minimum_max_fee_per_gas: builder_config.aa_min_fee_per_gas,
                 }
             )));
+
+            tracing::info!(
+                message = "AA mempool created successfully",
+                mempool_address = ?Arc::as_ptr(&mempool_service),
+            );
+
             builder_config.aa_mempool = Some(mempool_service);
             
-            // Start Kafka consumer if configured
-            #[cfg(feature = "kafka")]
-            if let Some(ref kafka_brokers) = builder_config.aa_kafka_brokers {
-                use crate::bundler::mempool_service::MempoolServiceConfig;
-                
-                let kafka_config = MempoolServiceConfig {
-                    kafka_brokers: kafka_brokers.clone(),
-                    kafka_topic: builder_config.aa_kafka_topic.clone(),
-                    consumer_group: builder_config.aa_kafka_consumer_group.clone(),
-                    minimum_max_fee_per_gas: builder_config.aa_min_fee_per_gas,
-                    kafka_properties: None, // TODO: Load from file if specified
-                };
-                
+            // Start mempool engine if Kafka is configured
+            if let Some(ref _kafka_brokers) = builder_config.aa_kafka_brokers {
+                let mempool_engine = create_mempool_engine_with_url(
+                    builder_config.aa_kafka_brokers.as_ref().unwrap(),
+                    &builder_config.aa_kafka_topic,
+                    &builder_config.aa_kafka_consumer_group,
+                    None,
+                ).unwrap();
+
+                mempool_engine_handle = Some(tokio::spawn(async move { mempool_engine.run().await }));
+
                 tracing::info!(
-                    message = "Starting Kafka consumer for AA mempool",
-                    brokers = %kafka_brokers,
-                    topic = %kafka_config.kafka_topic,
-                    consumer_group = %kafka_config.consumer_group,
+                    message = "Mempool engine started",
+                    topic = %builder_config.aa_kafka_topic,
+                    consumer_group = %builder_config.aa_kafka_consumer_group,
                 );
-                
-                if let Err(e) = mempool_service.start_consumer(kafka_config) {
-                    tracing::error!(error = %e, "Failed to start Kafka consumer for AA mempool");
-                } else {
-                    tracing::info!("Kafka consumer started for AA mempool");
-                }
             }
             
-            #[cfg(not(feature = "kafka"))]
-            if builder_config.aa_kafka_brokers.is_some() {
-                tracing::warn!(
-                    "Kafka brokers configured but 'kafka' feature is not enabled. \
-                     AA mempool will not receive UserOperations from Kafka."
-                );
-            }
             
             tracing::info!("AA mempool initialized");
         }
@@ -242,6 +249,12 @@ where
             .await?;
 
         handle.node_exit_future.await?;
+
+        // Join mempool engine handle after node exits
+        if let Some(handle) = mempool_engine_handle {
+            let _ = handle.await;
+        }
+
         Ok(())
     }
 }

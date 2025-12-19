@@ -218,4 +218,4 @@ opentelemetry = { version = "0.31", features = ["trace"] }
 concurrent-queue = "2.5.0"
 tips-core = { git = "https://github.com/base/tips", rev = "c08eaa4fe10c26de8911609b41ddab4918698325", default-features = false }
 # Local path dependency for account-abstraction-core (from tips repo)
-account-abstraction-core = { git="https://github.com/base/tips", rev="ea1bd09272749aa79739838c9e847cd4d8b6258b" }
+account-abstraction-core = { git="https://github.com/base/tips", rev="761133ba046f10bf23ce8475af79d3231f0cf231" }
