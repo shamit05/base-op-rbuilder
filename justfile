@@ -1,11 +1,11 @@
 # Build and run op-rbuilder in playground mode for testing
 run-playground:
-  cargo run -p op-rbuilder --bin op-rbuilder -- node \
+  OTEL_EXPORTER_OTLP_PROTOCOL=http cargo run -p op-rbuilder --bin op-rbuilder -- node \
       --chain $HOME/.playground/devnet/l2-genesis.json \
       --flashblocks.enabled \
       --builder.enable-resource-metering \
       --datadir ~/.playground/devnet/op-rbuilder \
-      -vv \
+      -vvv \
       --http --http.port 2222 \
       --authrpc.addr 0.0.0.0 --authrpc.port 4444 --authrpc.jwtsecret $HOME/.playground/devnet/jwtsecret \
       --port 30333 --disable-discovery \
@@ -15,7 +15,10 @@ run-playground:
       --builder.enable-aa-bundler \
       --aa.bundler-signer-key ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
       --aa.gas-threshold 50 \
-      --aa.gas-reserve-percentage 20
+      --aa.gas-reserve-percentage 20 \
+      --aa.kafka-brokers localhost:9092 \
+      --aa.kafka-topic tips-user-operation \
+      --aa.kafka-consumer-group op-rbuilder-bundler 
 
 # Run the complete test suite (genesis generation, build, and tests)
 run-tests:

@@ -152,7 +152,11 @@ where
                     None,
                 ).unwrap();
 
-                mempool_engine_handle = Some(tokio::spawn(async move { mempool_engine.run().await }));
+                mempool_engine_handle = Some(tokio::spawn(async move { 
+                    
+                    tracing::info!("Running mempool engine");
+                    mempool_engine.run().await 
+                }));
 
                 tracing::info!(
                     message = "Mempool engine started",

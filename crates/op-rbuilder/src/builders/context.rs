@@ -711,6 +711,8 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
             num_bundles = bundle_result.bundles.len(),
             total_ops = bundle_result.total_ops,
             estimated_gas = bundle_result.total_gas,
+            current_block_gas = info.cumulative_gas_used,
+            block_gas_limit = self.block_gas_limit(),
         );
 
         let mut bundles_executed = 0;
@@ -859,14 +861,19 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
 
         // Add to executed transactions
         info.executed_senders.push(signer.address);
+        let tx_hash = *signed_tx.tx_hash();
         info.executed_transactions.push(signed_tx.into_inner());
 
         info!(
             target: "payload_builder",
-            message = "AA bundle executed successfully",
+            message = "AA bundle transaction added to block",
+            tx_hash = ?tx_hash,
             entry_point = ?bundle.entry_point,
             num_ops = bundle.num_ops,
             gas_used = gas_used,
+            gas_limit = bundle.gas_limit,
+            nonce = nonce,
+            bundler_address = ?signer.address,
         );
 
         Ok(true)
