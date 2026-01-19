@@ -124,37 +124,35 @@ where
                 kafka_topic = %builder_config.aa_kafka_topic,
             );
 
-            tracing::info!(
-                message = "Creating in-memory AA mempool",
-                pool_type = "InMemoryMempool",
-                minimum_max_fee_per_gas = builder_config.aa_min_fee_per_gas,
-            );
+            // Start mempool engine if Kafka is configured, otherwise create standalone mempool
+            if let Some(ref kafka_brokers) = builder_config.aa_kafka_brokers {
+                tracing::info!(
+                    message = "Creating AA mempool with Kafka consumer",
+                    kafka_brokers = %kafka_brokers,
+                    topic = %builder_config.aa_kafka_topic,
+                    consumer_group = %builder_config.aa_kafka_consumer_group,
+                );
 
-            let mempool_service = Arc::new(RwLock::new(InMemoryMempool::new(
-                PoolConfig {
-                    minimum_max_fee_per_gas: builder_config.aa_min_fee_per_gas,
-                }
-            )));
-
-            tracing::info!(
-                message = "AA mempool created successfully",
-                mempool_address = ?Arc::as_ptr(&mempool_service),
-            );
-
-            builder_config.aa_mempool = Some(mempool_service);
-            
-            // Start mempool engine if Kafka is configured
-            if let Some(ref _kafka_brokers) = builder_config.aa_kafka_brokers {
                 let mempool_engine = create_mempool_engine_with_url(
-                    builder_config.aa_kafka_brokers.as_ref().unwrap(),
+                    kafka_brokers,
                     &builder_config.aa_kafka_topic,
                     &builder_config.aa_kafka_consumer_group,
-                    None,
-                ).unwrap();
+                    Some(PoolConfig {
+                        minimum_max_fee_per_gas: builder_config.aa_min_fee_per_gas,
+                    }),
+                ).expect("Failed to create mempool engine");
+
+                // Get the shared mempool FROM the engine - this is the key connection!
+                let shared_mempool = mempool_engine.get_mempool();
+                builder_config.aa_mempool = Some(shared_mempool.clone());
+
+                tracing::info!(
+                    message = "AA mempool obtained from engine",
+                    mempool_address = ?Arc::as_ptr(&shared_mempool),
+                );
 
                 mempool_engine_handle = Some(tokio::spawn(async move { 
-                    
-                    tracing::info!("Running mempool engine");
+                    tracing::info!("Running mempool engine Kafka consumer");
                     mempool_engine.run().await 
                 }));
 
@@ -163,6 +161,18 @@ where
                     topic = %builder_config.aa_kafka_topic,
                     consumer_group = %builder_config.aa_kafka_consumer_group,
                 );
+            } else {
+                tracing::info!(
+                    message = "Creating standalone in-memory AA mempool (no Kafka)",
+                    minimum_max_fee_per_gas = builder_config.aa_min_fee_per_gas,
+                );
+
+                let mempool_service = Arc::new(RwLock::new(InMemoryMempool::new(
+                    PoolConfig {
+                        minimum_max_fee_per_gas: builder_config.aa_min_fee_per_gas,
+                    }
+                )));
+                builder_config.aa_mempool = Some(mempool_service);
             }
             
             

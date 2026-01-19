@@ -132,35 +132,32 @@ pub struct BuilderConfig<Specific: Clone> {
     /// Resource metering context
     pub resource_metering: ResourceMetering,
 
-    /// Account Abstraction (AA) Native Bundler Configuration
-    /// Whether AA native bundler is enabled
+    // ========== AA Bundler Configuration ==========
+    /// Enable the AA bundler
     pub enable_aa_bundler: bool,
 
-    /// AA bundler signer for bundle transactions
+    /// Signer for AA bundler transactions
     pub aa_bundler_signer: Option<Signer>,
 
-    /// Percentage of gas to reserve for AA bundles
-    pub aa_gas_reserve_percentage: u8,
-
-    /// Threshold before reserving gas for AA bundles
+    /// Gas threshold percentage (0-100) to trigger bundle execution
     pub aa_gas_threshold: u8,
 
-    /// UserOperation pool connection URL (for remote pool, if not using local mempool)
-    pub aa_pool_url: Option<String>,
+    /// Gas reserve percentage (0-100) to reserve for AA bundles
+    pub aa_gas_reserve_percentage: u8,
 
-    /// Kafka brokers for AA mempool (e.g., "localhost:9092")
-    pub aa_kafka_brokers: Option<String>,
-
-    /// Kafka topic for UserOperations
-    pub aa_kafka_topic: String,
-
-    /// Kafka consumer group ID
-    pub aa_kafka_consumer_group: String,
-
-    /// Minimum max_fee_per_gas for UserOperations (in wei)
+    /// Minimum max fee per gas for UserOperations
     pub aa_min_fee_per_gas: u128,
 
-    /// Shared mempool for AA UserOperations (created once at startup)
+    /// Kafka brokers for AA mempool
+    pub aa_kafka_brokers: Option<String>,
+
+    /// Kafka topic for AA mempool
+    pub aa_kafka_topic: String,
+
+    /// Kafka consumer group for AA mempool
+    pub aa_kafka_consumer_group: String,
+
+    /// Shared mempool for AA UserOperations
     pub aa_mempool: Option<SharedMempool>,
 }
 
@@ -184,18 +181,6 @@ impl<S: Debug + Clone> core::fmt::Debug for BuilderConfig<S> {
             .field("specific", &self.specific)
             .field("max_gas_per_txn", &self.max_gas_per_txn)
             .field("gas_limiter_config", &self.gas_limiter_config)
-            .field("enable_aa_bundler", &self.enable_aa_bundler)
-            .field(
-                "aa_bundler_signer",
-                &self
-                    .aa_bundler_signer
-                    .as_ref()
-                    .map(|s| s.address.to_string())
-                    .unwrap_or_else(|| "None".to_string()),
-            )
-            .field("aa_gas_reserve_percentage", &self.aa_gas_reserve_percentage)
-            .field("aa_gas_threshold", &self.aa_gas_threshold)
-            .field("aa_pool_url", &self.aa_pool_url)
             .finish()
     }
 }
@@ -215,15 +200,15 @@ impl<S: Default + Clone> Default for BuilderConfig<S> {
             max_gas_per_txn: None,
             gas_limiter_config: GasLimiterArgs::default(),
             resource_metering: ResourceMetering::default(),
+            // AA Bundler defaults
             enable_aa_bundler: false,
             aa_bundler_signer: None,
+            aa_gas_threshold: 50,
             aa_gas_reserve_percentage: 20,
-            aa_gas_threshold: 30,
-            aa_pool_url: None,
+            aa_min_fee_per_gas: 0,
             aa_kafka_brokers: None,
-            aa_kafka_topic: "tips-userop".to_string(),
+            aa_kafka_topic: "tips-user-operation".to_string(),
             aa_kafka_consumer_group: "op-rbuilder-bundler".to_string(),
-            aa_min_fee_per_gas: 1_000_000_000, // 1 gwei
             aa_mempool: None,
         }
     }
@@ -251,15 +236,15 @@ where
                 args.enable_resource_metering,
                 args.resource_metering_buffer_size,
             ),
+            // AA Bundler configuration from args
             enable_aa_bundler: args.enable_aa_bundler,
-            aa_bundler_signer: args.aa_bundler_signer,
-            aa_gas_reserve_percentage: args.aa_gas_reserve_percentage,
+            aa_bundler_signer: args.aa_bundler_signer.clone(),
             aa_gas_threshold: args.aa_gas_threshold,
-            aa_pool_url: args.aa_pool_url.clone(),
+            aa_gas_reserve_percentage: args.aa_gas_reserve_percentage,
+            aa_min_fee_per_gas: args.aa_min_fee_per_gas,
             aa_kafka_brokers: args.aa_kafka_brokers.clone(),
             aa_kafka_topic: args.aa_kafka_topic.clone(),
             aa_kafka_consumer_group: args.aa_kafka_consumer_group.clone(),
-            aa_min_fee_per_gas: args.aa_min_fee_per_gas,
             aa_mempool: None, // Created separately during service startup
             specific: S::try_from(args)?,
         })

@@ -718,7 +718,15 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
         let mut bundles_executed = 0;
 
         // Execute each bundle transaction
-        for bundle in &bundle_result.bundles {
+        for (idx, bundle) in bundle_result.bundles.iter().enumerate() {
+            info!(
+                target: "payload_builder",
+                message = "AA bundler: attempting bundle execution",
+                bundle_index = idx,
+                entry_point = ?bundle.entry_point,
+                num_ops = bundle.num_ops,
+                gas_limit = bundle.gas_limit,
+            );
             match self.execute_aa_bundle_tx(info, db, bundle) {
                 Ok(true) => {
                     bundles_executed += 1;
@@ -731,16 +739,16 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
                     );
                 }
                 Ok(false) => {
-                    debug!(
+                    info!(
                         target: "payload_builder",
-                        message = "AA bundle skipped (would exceed limits)",
+                        message = "AA bundle skipped (returned false)",
                         entry_point = ?bundle.entry_point,
                     );
                 }
                 Err(e) => {
-                    debug!(
+                    info!(
                         target: "payload_builder",
-                        message = "AA bundle execution failed",
+                        message = "AA bundle execution failed with error",
                         entry_point = ?bundle.entry_point,
                         error = ?e,
                     );
@@ -770,9 +778,9 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
         // Check if we have room for this bundle
         let block_gas_limit = self.block_gas_limit();
         if info.cumulative_gas_used + bundle.gas_limit > block_gas_limit {
-            debug!(
+            info!(
                 target: "payload_builder",
-                message = "AA bundle would exceed block gas limit",
+                message = "AA bundle skipped: would exceed block gas limit",
                 cumulative_gas = info.cumulative_gas_used,
                 bundle_gas = bundle.gas_limit,
                 block_limit = block_gas_limit,
@@ -781,9 +789,9 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
         }
 
         let Some(signer) = &self.aa_bundler_signer else {
-            debug!(
+            info!(
                 target: "payload_builder",
-                message = "AA bundler signer not configured",
+                message = "AA bundle skipped: signer not configured",
             );
             return Ok(false);
         };
@@ -822,9 +830,9 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
         let ResultAndState { result, state } = match evm.transact(&signed_tx) {
             Ok(res) => res,
             Err(err) => {
-                debug!(
+                info!(
                     target: "payload_builder",
-                    message = "AA bundle transaction EVM error",
+                    message = "AA bundle skipped: EVM transact error",
                     error = ?err,
                 );
                 return Ok(false);
@@ -835,10 +843,11 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
 
         // Check if successful
         if !result.is_success() {
-            debug!(
+            info!(
                 target: "payload_builder",
-                message = "AA bundle transaction reverted",
+                message = "AA bundle skipped: transaction reverted",
                 gas_used = gas_used,
+                output = ?result.output(),
             );
             return Ok(false);
         }
@@ -867,13 +876,13 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
         info!(
             target: "payload_builder",
             message = "AA bundle transaction added to block",
-            tx_hash = ?tx_hash,
-            entry_point = ?bundle.entry_point,
+            tx_hash = %format!("{:?}", tx_hash),
+            entry_point = %format!("{:?}", bundle.entry_point),
             num_ops = bundle.num_ops,
             gas_used = gas_used,
             gas_limit = bundle.gas_limit,
             nonce = nonce,
-            bundler_address = ?signer.address,
+            bundler_address = %format!("{:?}", signer.address),
         );
 
         Ok(true)
